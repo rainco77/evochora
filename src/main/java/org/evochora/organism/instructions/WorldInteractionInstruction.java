@@ -33,15 +33,63 @@ public class WorldInteractionInstruction extends Instruction implements IWorldMo
             int[] vector;
 
             if ("POKS".equals(opName)) {
-                Object value = operands.get(0).value();
-                vector = (int[]) operands.get(1).value();
-                valueToWrite = value;
+                if (operands.size() >= 2) {
+                    Object value = operands.get(0).value();
+                    vector = (int[]) operands.get(1).value();
+                    valueToWrite = value;
+                } else {
+                    // Fallback: read from stack (top=value, next=vector)
+                    Object value = organism.getDataStack().pop();
+                    Object vecObj = organism.getDataStack().pop();
+                    if (!(vecObj instanceof int[])) {
+                        organism.instructionFailed("POKS requires a vector on stack.");
+                        return;
+                    }
+                    valueToWrite = value;
+                    vector = (int[]) vecObj;
+                }
             } else if ("POKE".equals(opName) || "POKI".equals(opName)) {
-                int targetReg = operands.get(0).rawSourceId();
-                vector = (int[]) operands.get(1).value();
-                valueToWrite = readOperand(targetReg);
+                if (operands.size() >= 2) {
+                    int targetReg = operands.get(0).rawSourceId();
+                    vector = (int[]) operands.get(1).value();
+                    valueToWrite = readOperand(targetReg);
+                } else {
+                    // Fallback: decode directly from world arguments
+                    int[] ip = organism.getIpBeforeFetch();
+                    // Skip opcode cell
+                    int[] next = organism.getNextInstructionPosition(ip, world, organism.getDvBeforeFetch());
+                    // First arg: register id for value
+                    int regId = Symbol.fromInt(world.getSymbol(next).toInt()).toScalarValue();
+                    valueToWrite = readOperand(regId);
+
+                    if ("POKE".equals(opName)) {
+                        // Second arg: register id holding vector
+                        next = organism.getNextInstructionPosition(next, world, organism.getDvBeforeFetch());
+                        int vecRegId = Symbol.fromInt(world.getSymbol(next).toInt()).toScalarValue();
+                        Object vecObj = readOperand(vecRegId);
+                        if (!(vecObj instanceof int[])) {
+                            organism.instructionFailed("POKE requires vector in register.");
+                            return;
+                        }
+                        vector = (int[]) vecObj;
+                    } else {
+                        // POKI: following WORLD_DIMENSIONS ints form a vector
+                        int dims = world.getShape().length;
+                        vector = new int[dims];
+                        for (int d = 0; d < dims; d++) {
+                            next = organism.getNextInstructionPosition(next, world, organism.getDvBeforeFetch());
+                            vector[d] = Symbol.fromInt(world.getSymbol(next).toInt()).toScalarValue();
+                        }
+                    }
+                }
             } else {
                 organism.instructionFailed("Unknown world interaction: " + opName);
+                return;
+            }
+
+            // Enforce unit vector
+            if (!organism.isUnitVector(vector)) {
+                organism.instructionFailed(opName + " requires a unit vector.");
                 return;
             }
 
@@ -59,7 +107,8 @@ public class WorldInteractionInstruction extends Instruction implements IWorldMo
         }
     }
 
-    private void handlePeek(World world, int targetReg) {
+
+    /*private void handlePeek(World world, int targetReg) {
         if (getConflictStatus() == ConflictResolutionStatus.WON_EXECUTION || getConflictStatus() == ConflictResolutionStatus.NOT_APPLICABLE) {
             Symbol s = world.getSymbol(targetCoordinate);
             if (s.isEmpty()) {
@@ -84,7 +133,7 @@ public class WorldInteractionInstruction extends Instruction implements IWorldMo
             }
             world.setSymbol(new Symbol(Config.TYPE_CODE, 0), targetCoordinate);
         }
-    }
+    }*/
 
     private void handlePoke(World world, Object valueToWrite) {
         if (getConflictStatus() == ConflictResolutionStatus.WON_EXECUTION || getConflictStatus() == ConflictResolutionStatus.NOT_APPLICABLE) {
@@ -92,8 +141,13 @@ public class WorldInteractionInstruction extends Instruction implements IWorldMo
                 organism.instructionFailed("POKE: Cannot write vectors to the world.");
                 return;
             }
+            // Charge energy equal to the absolute payload of the symbol being written
+            Symbol toWrite = Symbol.fromInt((Integer) valueToWrite);
+            int cost = Math.abs(toWrite.toScalarValue());
+            if (cost > 0) organism.takeEr(cost);
+
             if (world.getSymbol(targetCoordinate).isEmpty()) {
-                world.setSymbol(Symbol.fromInt((Integer)valueToWrite), targetCoordinate);
+                world.setSymbol(toWrite, targetCoordinate);
             } else {
                 organism.instructionFailed("POKE: Target cell is not empty.");
                 if (getConflictStatus() != ConflictResolutionStatus.NOT_APPLICABLE) setConflictStatus(ConflictResolutionStatus.LOST_TARGET_OCCUPIED);
@@ -101,14 +155,14 @@ public class WorldInteractionInstruction extends Instruction implements IWorldMo
         }
     }
 
-    private void handleScan(World world, int targetReg) {
+    /*private void handleScan(World world, int targetReg) {
         Symbol s = world.getSymbol(targetCoordinate);
         if (getName().endsWith("S")) {
             organism.getDataStack().push(s.toInt());
         } else {
             writeOperand(targetReg, s.toInt());
         }
-    }
+    }*/
 
     public static Instruction plan(Organism organism, World world) {
         int fullOpcodeId = world.getSymbol(organism.getIp()).toInt();
@@ -148,20 +202,49 @@ public class WorldInteractionInstruction extends Instruction implements IWorldMo
     @Override
     public List<int[]> getTargetCoordinates() {
         if (this.targetCoordinate == null) {
-            // Re-calculate target coordinate on demand if not already set by execute()
             try {
-                List<Operand> operands = resolveOperands(organism.getSimulation().getWorld());
-                if (operands.isEmpty()) return List.of();
-                Object vectorOperandValue = null;
+                World world = organism.getSimulation().getWorld();
                 String op = getName();
+                int[] vec = null;
+
                 if ("POKS".equals(op)) {
-                    if (operands.size() > 1) vectorOperandValue = operands.get(1).value(); // value, then vector
-                } else if (operands.size() > 1) {
-                    vectorOperandValue = operands.get(1).value();
+                    // Non-destructive peek: top=value, next=vector
+                    java.util.Iterator<Object> it = organism.getDataStack().iterator();
+                    if (it.hasNext()) {
+                        it.next(); // skip top (value)
+                        if (it.hasNext()) {
+                            Object nxt = it.next();
+                            if (nxt instanceof int[]) vec = (int[]) nxt;
+                        }
+                    }
+                } else if ("POKE".equals(op)) {
+                    // Decode from instruction arguments: [regId(value), regId(vector)]
+                    int[] ip = organism.getIpBeforeFetch();
+                    int[] a1 = organism.getNextInstructionPosition(ip, world, organism.getDvBeforeFetch()); // regId(value) - unused here
+                    int[] a2 = organism.getNextInstructionPosition(a1, world, organism.getDvBeforeFetch()); // regId(vector)
+                        int vecRegId = Symbol.fromInt(world.getSymbol(a2).toInt()).toScalarValue();
+                    Object regVal = readOperand(vecRegId);
+                    if (regVal instanceof int[]) vec = (int[]) regVal;
+                } else if ("POKI".equals(op)) {
+                    // Decode from instruction args: [regId(value), v0, v1, ...]
+                    int dims = world.getShape().length;
+                    int[] ip = organism.getIpBeforeFetch();
+                    int[] cur = organism.getNextInstructionPosition(ip, world, organism.getDvBeforeFetch()); // skip regId
+                    int[] tmp = new int[dims];
+                    for (int d = 0; d < dims; d++) {
+                        cur = organism.getNextInstructionPosition(cur, world, organism.getDvBeforeFetch());
+                        tmp[d] = org.evochora.world.Symbol.fromInt(world.getSymbol(cur).toInt()).toScalarValue();
+                    }
+                    vec = tmp;
+                } else {
+                    return List.of();
                 }
 
-                if (vectorOperandValue instanceof int[]) {
-                    this.targetCoordinate = organism.getTargetCoordinate(organism.getDp(), (int[]) vectorOperandValue, organism.getSimulation().getWorld());
+                if (vec != null && organism.isUnitVector(vec)) {
+                    this.targetCoordinate = organism.getTargetCoordinate(organism.getDp(), vec, world);
+                } else {
+                    // Not a unit vector or cannot determine -> no target
+                    return List.of();
                 }
             } catch (Exception e) {
                 return List.of();

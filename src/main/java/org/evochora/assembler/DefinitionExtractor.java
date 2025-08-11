@@ -18,6 +18,8 @@ public class DefinitionExtractor {
     private final Map<String, String> defineMap = new HashMap<>();
     private final Map<String, ProcMeta> procMetaMap = new HashMap<>();
     private final List<AnnotatedLine> mainCode = new ArrayList<>();
+    // Defer PROC bodies to ensure entry starts at caller code
+    private final List<AnnotatedLine> deferredProcBodies = new ArrayList<>();
 
     // Records bleiben unverändert
     public record RoutineDefinition(String name, List<String> parameters, List<String> body, String fileName) {}
@@ -79,6 +81,10 @@ public class DefinitionExtractor {
                         if (parts.length != 3) throw new AssemblerException(programName, line.originalFileName(), line.originalLineNumber(), Messages.get("definitionExtractor.defineArguments"), line.content());
                         defineMap.put(parts[1].toUpperCase(), parts[2]);
                     }
+                    case ".PREG" -> {
+                        // .PREG is only valid inside a .PROC block
+                        throw new AssemblerException(programName, line.originalFileName(), line.originalLineNumber(), "Invalid .PREG outside .PROC", line.content());
+                    }
                     case ".ENDP", ".ENDM", ".ENDR" -> {
                         throw new AssemblerException(programName, line.originalFileName(), line.originalLineNumber(), Messages.get("definitionExtractor.unexpectedDirectiveOutsideBlock", directive), line.content());
                     }
@@ -92,6 +98,8 @@ public class DefinitionExtractor {
             throw new AssemblerException(programName, blockStartLine.originalFileName(), blockStartLine.originalLineNumber(), Messages.get("definitionExtractor.blockNotClosed", blockName), blockStartLine.content());
         }
 
+        // Append deferred PROC bodies after the rest of the code
+        mainCode.addAll(deferredProcBodies);
         return mainCode;
     }
 
@@ -101,4 +109,9 @@ public class DefinitionExtractor {
     public Map<String, String> getDefineMap() { return defineMap; }
     public Map<String, ProcMeta> getProcMetaMap() { return procMetaMap; }
     public List<AnnotatedLine> getMainCode() { return mainCode; }
+
+    // Public for cross-package access from directive handlers
+    public void addDeferredProcBody(List<AnnotatedLine> procBodyLines) {
+        this.deferredProcBodies.addAll(procBodyLines);
+    }
 }

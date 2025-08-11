@@ -137,9 +137,9 @@ public class PassManager {
                     String label = strippedLine.substring(0, strippedLine.length() - 1).toUpperCase();
                     currentProcLabel = (procMetaMap != null && procMetaMap.containsKey(label)) ? label : currentProcLabel;
                 } else if (head.equals(".ORG")) {
-                    currentPos = Arrays.stream(parts[1].split("\\|")).mapToInt(Integer::parseInt).toArray();
+                    currentPos = Arrays.stream(parts[1].split("\\|")).mapToInt(org.evochora.assembler.NumericParser::parseInt).toArray();
                 } else if (head.equals(".DIR")) {
-                    currentDv = Arrays.stream(parts[1].split("\\|")).mapToInt(Integer::parseInt).toArray();
+                    currentDv = Arrays.stream(parts[1].split("\\|")).mapToInt(org.evochora.assembler.NumericParser::parseInt).toArray();
                 } else if (head.equals(".PROC")) {
                     if (parts.length >= 2) {
                         String procName = parts[1].toUpperCase();
@@ -209,13 +209,28 @@ public class PassManager {
                 DefinitionExtractor.ProcMeta meta = procMetaMap.get(procName);
                 boolean hasFormParams = meta != null && meta.formalParams() != null && !meta.formalParams().isEmpty();
 
-                System.out.println("procName: " + procName + ", hasFormParams: " + hasFormParams + ", withIdx: " + withIdx);
-
                 if (hasFormParams) {
                     if (withIdx < 0) {
                         throw new AssemblerException(programName, line.originalFileName(), line.originalLineNumber(), Messages.get("call.with.requiresWithProc"), line.content());
                     }
-                    handleCallWith(args, withIdx, line, resolveTargetProc);
+                    // Resolve actual DR register IDs for VM-internal binding
+                    String[] actuals = java.util.Arrays.copyOfRange(args, withIdx + 1, args.length);
+                    int formalCount = meta.formalParams().size();
+                    if (actuals.length != formalCount) {
+                        throw new AssemblerException(programName, line.originalFileName(), line.originalLineNumber(),
+                                "CALL .WITH argument count mismatch: expected " + formalCount + " but got " + actuals.length, line.content());
+                    }
+                    int[] drIds = new int[formalCount];
+                    for (int i = 0; i < formalCount; i++) {
+                        drIds[i] = resolveToRegisterId(actuals[i], line);
+                    }
+                    // Capture CALL opcode coordinate before emission
+                    int[] callCoord = java.util.Arrays.copyOf(currentPos, currentPos.length);
+                    // Emit the actual call (no extra machine code for binding)
+                    AssemblerOutput call = new AssemblerOutput.JumpInstructionRequest(target);
+                    emitInstruction(call, Instruction.getInstructionIdByName("CALL"), line);
+                    // Register binding for VM to use at runtime
+                    org.evochora.organism.instructions.ControlFlowInstruction.registerCallBindingForCoord(callCoord, drIds);
                 } else {
                     if (withIdx >= 0) {
                         throw new AssemblerException(programName, line.originalFileName(), line.originalLineNumber(), Messages.get("call.with.usedOnDsProc"), line.content());
@@ -277,14 +292,57 @@ public class PassManager {
     }
 
     private void emitSetr(Object dest, Object src, AnnotatedLine line) {
-        Map<String, Integer> regMapForAsm = buildRegisterMapForCurrentContext();
+        // Resolve destination and source to concrete register IDs
+        int destId = resolveToRegisterId(dest, line);
+        int srcId = resolveToRegisterId(src, line);
 
-        String destStr = (dest instanceof String) ? (String) dest : "%FPR" + ((int)dest - 2000);
-        String srcStr = (src instanceof String) ? (String) src : "%FPR" + ((int)src - 2000);
+        // Emit SETR arguments directly to avoid assembler-side register token issues
+        AssemblerOutput output = new AssemblerOutput.CodeSequence(java.util.List.of(
+                new org.evochora.world.Symbol(org.evochora.Config.TYPE_DATA, destId).toInt(),
+                new org.evochora.world.Symbol(org.evochora.Config.TYPE_DATA, srcId).toInt()
+        ));
+        emitInstruction(output, org.evochora.organism.Instruction.getInstructionIdByName("SETR"), line);
+    }
 
-        AssemblerOutput output = Instruction.getAssemblerById(Instruction.getInstructionIdByName("SETR"))
-                .apply(new String[]{destStr, srcStr}, regMapForAsm, labelMap);
-        emitInstruction(output, Instruction.getInstructionIdByName("SETR"), line);
+    /**
+     * Resolves a register operand (String token or Integer FPR ID) into a concrete register ID.
+     * Supports %DRx, %PRx, %FPRn, bare formal names within the current PROC, and direct Integer IDs (e.g., FPR base + index).
+     */
+    private int resolveToRegisterId(Object operand, AnnotatedLine line) {
+        if (operand instanceof Integer i) {
+            return i;
+        }
+        String token = ((String) operand).toUpperCase();
+
+        // Prefer the current context register map (handles %DRx, %PRx, and formals if provided)
+        java.util.Map<String, Integer> regMap = buildRegisterMapForCurrentContext();
+        Integer id = org.evochora.organism.Instruction.resolveRegToken(token, regMap);
+        if (id != null) return id;
+
+        // Fallback: bare formal name resolution within the current PROC
+        if (currentProcLabel != null) {
+            DefinitionExtractor.ProcMeta meta = procMetaMap.get(currentProcLabel);
+            if (meta != null && meta.formalParams() != null) {
+                java.util.List<String> formals = meta.formalParams();
+                for (int i = 0; i < formals.size(); i++) {
+                    if (formals.get(i).equalsIgnoreCase(token)) {
+                        return 2000 + i; // FPR base + index
+                    }
+                }
+            }
+        }
+
+        // Fallback: explicit %FPRn token
+        if (token.startsWith("%FPR")) {
+            try {
+                int n = Integer.parseInt(token.substring(4));
+                return 2000 + n;
+            } catch (NumberFormatException ignored) {
+                // fall through to error
+            }
+        }
+
+        throw new AssemblerException(programName, line.originalFileName(), line.originalLineNumber(), "Invalid register for SETR.", line.content());
     }
 
     private void emitInstruction(AssemblerOutput output, int fullOpcodeId, AnnotatedLine line) {
