@@ -59,7 +59,7 @@ class AppController {
                 this.renderer.drawInitial(newData);
             } else {
                 const changes = DiffCalculator.calculate(oldData, newData);
-                this.renderer.applyChanges(changes);
+                this.renderer.applyChanges(changes, newData);
             }
 
             this.state.lastTickData = newData;

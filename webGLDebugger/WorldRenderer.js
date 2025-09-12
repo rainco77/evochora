@@ -7,15 +7,12 @@ class WorldRenderer {
     constructor(canvas, config, appController) {
         this.canvas = canvas;
         this.config = config;
-        this.appController = appController; // Reference to the controller
+        this.appController = appController;
         this.organismColorMap = new Map();
         this.selectedOrganismId = null;
 
         this.cellGraphics = new Map();
         this.organismGraphics = new Map();
-
-        this.tooltip = document.getElementById('cell-tooltip');
-        // Tooltip implementation is out of scope for this fix
     }
 
     async init() {
@@ -45,8 +42,7 @@ class WorldRenderer {
 
     selectOrganism(organismId) {
         this.selectedOrganismId = organismId;
-        // Redraw all organisms to update their selection state
-        this.organismGraphics.forEach((graphics, id) => {
+        this.organismGraphics.forEach((graphics) => {
             this._drawOrganism(graphics.organism, graphics);
         });
     }
@@ -65,7 +61,7 @@ class WorldRenderer {
         for (const organism of organisms) { this._addOrganism(organism); }
     }
 
-    applyChanges(worldChanges) {
+    applyChanges(worldChanges, newWorldState) {
         if (!this.app) return;
 
         const { cells: cellChanges, organisms: organismChanges } = worldChanges;
@@ -84,20 +80,16 @@ class WorldRenderer {
         const key = this._getCellKey(cell.position);
         const container = new PIXI.Container();
         const bg = new PIXI.Graphics();
-        const textStyle = new PIXI.TextStyle({
+        const text = new PIXI.Text({style: {
             fontFamily: "'Monospaced', 'Courier New'",
             fontSize: this.config.cellSize * 0.4,
             fill: this._getTextColorForType(cell.type),
             align: 'center',
-        });
-        const text = new PIXI.Text({style: textStyle});
+        }});
         text.anchor.set(0.5);
-
         container.addChild(bg, text);
-
         const graphics = { container, bg, text };
         this._drawCell(graphics, cell);
-
         this.backgroundLayer.addChild(container);
         this.cellGraphics.set(key, graphics);
     }
@@ -120,16 +112,12 @@ class WorldRenderer {
 
     _drawCell(graphics, cell) {
         const { container, bg, text } = graphics;
-        const pos = cell.position;
-        container.position.set(pos[0] * this.config.cellSize, pos[1] * this.config.cellSize);
-
+        container.position.set(cell.position[0] * this.config.cellSize, cell.position[1] * this.config.cellSize);
         bg.clear().rect(0, 0, this.config.cellSize, this.config.cellSize).fill(this._getBackgroundColorForType(cell.type));
-
         let cellText = '';
         if ((cell.type === this.config.typeCode && (cell.value !== 0 || cell.ownerId !== 0)) || cell.type !== this.config.typeCode) {
             cellText = (cell.type === this.config.typeCode) ? (cell.opcodeName || String(cell.value)) : String(cell.value);
         }
-
         text.text = cellText;
         text.style.fill = this._getTextColorForType(cell.type);
         text.position.set(this.config.cellSize / 2, this.config.cellSize / 2);
@@ -137,6 +125,8 @@ class WorldRenderer {
 
     // --- Organism Rendering ---
     _addOrganism(organism) {
+        if (!organism || !Array.isArray(organism.position)) return; // Safety check
+
         const container = new PIXI.Container();
         const ip = new PIXI.Graphics();
         ip.interactive = true;
@@ -145,7 +135,6 @@ class WorldRenderer {
 
         const dv = new PIXI.Graphics();
         const dpsContainer = new PIXI.Container();
-
         container.addChild(ip, dv, dpsContainer);
 
         const graphics = { organism, container, ip, dv, dpsContainer, dps: new Map() };
@@ -156,9 +145,10 @@ class WorldRenderer {
     }
 
     _updateOrganism(organism) {
+        if (!organism || !Array.isArray(organism.position)) return; // Safety check
         const graphics = this.organismGraphics.get(organism.id);
         if (graphics) {
-            graphics.organism = organism; // Update organism data
+            graphics.organism = organism;
             this._drawOrganism(organism, graphics);
         }
         else this._addOrganism(organism);
@@ -176,6 +166,8 @@ class WorldRenderer {
     _drawOrganism(organism, graphics) {
         const { container, ip, dv, dpsContainer } = graphics;
         const pos = organism.position;
+        if (!pos) return; // Safety check
+
         const color = this._getOrganismColor(organism.id);
         const isSelected = this.selectedOrganismId === String(organism.id);
 
@@ -215,7 +207,8 @@ class WorldRenderer {
         const container = new PIXI.Container();
         container.position.set((pos[0] - ipPos[0]) * this.config.cellSize, (pos[1] - ipPos[1]) * this.config.cellSize);
 
-        const border = new PIXI.Graphics().stroke({ width: 2.0, color: color }).setStrokeDash(3, 3).drawRect(0, 0, this.config.cellSize, this.config.cellSize);
+        const border = new PIXI.Graphics();
+        this._drawDashedRect(border, 0, 0, this.config.cellSize, this.config.cellSize, 2.0, color);
         container.addChild(border);
 
         if (isActive) {
@@ -226,7 +219,6 @@ class WorldRenderer {
             }
             container.addChild(hatching);
         }
-
         if (indices.length > 0) {
             const text = new PIXI.Text({text: indices.join(','), style: {
                 fontFamily: "'Monospaced', 'Courier New'", fontSize: this.config.cellSize * 0.45,
@@ -237,6 +229,20 @@ class WorldRenderer {
             container.addChild(text);
         }
         return container;
+    }
+
+    _drawDashedRect(g, x, y, width, height, lineWidth, color) {
+        g.stroke({ width: lineWidth, color: color });
+        const dash = 3;
+        const gap = 3;
+        // Top
+        for(let i = x; i < x + width; i += dash + gap) g.moveTo(i, y).lineTo(i + dash, y);
+        // Right
+        for(let i = y; i < y + height; i += dash + gap) g.moveTo(x + width, i).lineTo(x + width, i + dash);
+        // Bottom
+        for(let i = x + width; i > x; i -= dash + gap) g.moveTo(i, y + height).lineTo(i - dash, y + height);
+        // Left
+        for(let i = y + height; i > y; i -= dash + gap) g.moveTo(x, i).lineTo(x, i - dash);
     }
 
     processWorldState(worldState) {
