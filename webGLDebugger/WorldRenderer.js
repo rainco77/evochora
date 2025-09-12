@@ -4,23 +4,21 @@ class WorldRenderer {
         0xffa500, 0x9370db, 0x00ffff
     ];
 
-    constructor(canvas, config, isa) {
+    constructor(canvas, config, appController) {
         this.canvas = canvas;
         this.config = config;
-        this.isa = isa; // ISA is not used, but kept for compatibility
+        this.appController = appController; // Reference to the controller
         this.organismColorMap = new Map();
+        this.selectedOrganismId = null;
 
-        // Internal maps to store references to PIXI objects
-        this.cellGraphics = new Map(); // key: "x|y", value: PIXI.Graphics
-        this.organismGraphics = new Map(); // key: organismId, value: { container: PIXI.Container, ip: PIXI.Graphics, dps: Map, dv: PIXI.Graphics }
+        this.cellGraphics = new Map();
+        this.organismGraphics = new Map();
 
-        // Tooltip
         this.tooltip = document.getElementById('cell-tooltip');
-        this.setupTooltipEvents();
+        // Tooltip implementation is out of scope for this fix
     }
 
     async init() {
-        // PIXI App
         this.app = new PIXI.Application();
         await this.app.init({
             canvas: this.canvas,
@@ -32,9 +30,8 @@ class WorldRenderer {
             autoDensity: true
         });
 
-        // Layers
-        this.backgroundLayer = new PIXI.Container(); // For cells
-        this.foregroundLayer = new PIXI.Container(); // For organisms, markers
+        this.backgroundLayer = new PIXI.Container();
+        this.foregroundLayer = new PIXI.Container();
         this.app.stage.addChild(this.backgroundLayer, this.foregroundLayer);
     }
 
@@ -46,105 +43,112 @@ class WorldRenderer {
         }
     }
 
-    /**
-     * Draws the initial state of the world.
-     * @param {object} worldState - The full world state for the first tick.
-     */
+    selectOrganism(organismId) {
+        this.selectedOrganismId = organismId;
+        // Redraw all organisms to update their selection state
+        this.organismGraphics.forEach((graphics, id) => {
+            this._drawOrganism(graphics.organism, graphics);
+        });
+    }
+
     drawInitial(worldState) {
-        if (!this.app) {
-            console.error("Pixi app not initialized!");
-            return;
-        }
+        if (!this.app) { console.error("Pixi app not initialized!"); return; }
 
         const { cells, organisms } = this.processWorldState(worldState);
 
-        // Clear everything
         this.backgroundLayer.removeChildren();
         this.foregroundLayer.removeChildren();
         this.cellGraphics.clear();
         this.organismGraphics.clear();
 
-        // Draw all cells
-        for (const cell of cells) {
-            this._addCell(cell);
-        }
-
-        // Draw all organisms
-        for (const organism of organisms) {
-            this._addOrganism(organism);
-        }
+        for (const cell of cells) { this._addCell(cell); }
+        for (const organism of organisms) { this._addOrganism(organism); }
     }
 
-    /**
-     * Applies incremental changes to the world.
-     * @param {object} worldChanges - The diff object from DiffCalculator.
-     * @param {object} newWorldState - The complete new world state.
-     */
-    applyChanges(worldChanges, newWorldState) {
+    applyChanges(worldChanges) {
         if (!this.app) return;
 
         const { cells: cellChanges, organisms: organismChanges } = worldChanges;
-        const { organisms: newOrganisms } = this.processWorldState(newWorldState);
 
-        // Process cell changes
         cellChanges.removed.forEach(cell => this._removeCell(cell));
         cellChanges.added.forEach(cell => this._addCell(cell));
         cellChanges.updated.forEach(cell => this._updateCell(cell));
 
-        // Process organism changes
         organismChanges.removed.forEach(organism => this._removeOrganism(organism));
-        // For added and updated, we use the full new organism list to handle selections correctly
         organismChanges.added.forEach(organism => this._addOrganism(organism));
         organismChanges.updated.forEach(organism => this._updateOrganism(organism));
     }
 
+    // --- Cell Rendering ---
     _addCell(cell) {
         const key = this._getCellKey(cell.position);
-        const g = new PIXI.Graphics();
-        this._drawCell(g, cell);
-        this.backgroundLayer.addChild(g);
-        this.cellGraphics.set(key, g);
+        const container = new PIXI.Container();
+        const bg = new PIXI.Graphics();
+        const textStyle = new PIXI.TextStyle({
+            fontFamily: "'Monospaced', 'Courier New'",
+            fontSize: this.config.cellSize * 0.4,
+            fill: this._getTextColorForType(cell.type),
+            align: 'center',
+        });
+        const text = new PIXI.Text({style: textStyle});
+        text.anchor.set(0.5);
+
+        container.addChild(bg, text);
+
+        const graphics = { container, bg, text };
+        this._drawCell(graphics, cell);
+
+        this.backgroundLayer.addChild(container);
+        this.cellGraphics.set(key, graphics);
     }
 
     _updateCell(cell) {
-        const key = this._getCellKey(cell.position);
-        const g = this.cellGraphics.get(key);
-        if (g) {
-            this._drawCell(g, cell);
-        } else {
-            // If it doesn't exist for some reason, add it
-            this._addCell(cell);
-        }
+        const graphics = this.cellGraphics.get(this._getCellKey(cell.position));
+        if (graphics) this._drawCell(graphics, cell);
+        else this._addCell(cell);
     }
 
     _removeCell(cell) {
         const key = this._getCellKey(cell.position);
-        const g = this.cellGraphics.get(key);
-        if (g) {
-            this.backgroundLayer.removeChild(g);
-            g.destroy();
+        const graphics = this.cellGraphics.get(key);
+        if (graphics) {
+            this.backgroundLayer.removeChild(graphics.container);
+            graphics.container.destroy({ children: true });
             this.cellGraphics.delete(key);
         }
     }
 
-    _drawCell(g, cell) {
-        g.clear();
+    _drawCell(graphics, cell) {
+        const { container, bg, text } = graphics;
         const pos = cell.position;
-        const x = pos[0] * this.config.cellSize;
-        const y = pos[1] * this.config.cellSize;
+        container.position.set(pos[0] * this.config.cellSize, pos[1] * this.config.cellSize);
 
-        // Background
-        g.rect(x, y, this.config.cellSize, this.config.cellSize).fill(this._getBackgroundColorForType(cell.type));
+        bg.clear().rect(0, 0, this.config.cellSize, this.config.cellSize).fill(this._getBackgroundColorForType(cell.type));
+
+        let cellText = '';
+        if ((cell.type === this.config.typeCode && (cell.value !== 0 || cell.ownerId !== 0)) || cell.type !== this.config.typeCode) {
+            cellText = (cell.type === this.config.typeCode) ? (cell.opcodeName || String(cell.value)) : String(cell.value);
+        }
+
+        text.text = cellText;
+        text.style.fill = this._getTextColorForType(cell.type);
+        text.position.set(this.config.cellSize / 2, this.config.cellSize / 2);
     }
 
+    // --- Organism Rendering ---
     _addOrganism(organism) {
         const container = new PIXI.Container();
         const ip = new PIXI.Graphics();
-        container.addChild(ip);
+        ip.interactive = true;
+        ip.cursor = 'pointer';
+        ip.on('pointerdown', () => this.appController.handleOrganismSelection(organism.id));
 
-        const graphics = { container, ip, dps: new Map(), dv: new PIXI.Graphics() };
-        container.addChild(graphics.dv);
+        const dv = new PIXI.Graphics();
+        const dpsContainer = new PIXI.Container();
 
+        container.addChild(ip, dv, dpsContainer);
+
+        const graphics = { organism, container, ip, dv, dpsContainer, dps: new Map() };
         this._drawOrganism(organism, graphics);
 
         this.foregroundLayer.addChild(container);
@@ -154,10 +158,10 @@ class WorldRenderer {
     _updateOrganism(organism) {
         const graphics = this.organismGraphics.get(organism.id);
         if (graphics) {
+            graphics.organism = organism; // Update organism data
             this._drawOrganism(organism, graphics);
-        } else {
-            this._addOrganism(organism);
         }
+        else this._addOrganism(organism);
     }
 
     _removeOrganism(organism) {
@@ -170,44 +174,88 @@ class WorldRenderer {
     }
 
     _drawOrganism(organism, graphics) {
-        const { container, ip } = graphics;
+        const { container, ip, dv, dpsContainer } = graphics;
         const pos = organism.position;
-        container.position.set(pos[0] * this.config.cellSize, pos[1] * this.config.cellSize);
-
         const color = this._getOrganismColor(organism.id);
+        const isSelected = this.selectedOrganismId === String(organism.id);
 
-        // Draw IP
-        ip.clear();
-        ip.stroke({ width: 2.5, color: organism.energy <= 0 ? this.config.colorDead : color });
-        ip.drawRect(0, 0, this.config.cellSize, this.config.cellSize);
+        container.position.set(pos[0] * this.config.cellSize, pos[1] * this.config.cellSize);
+        ip.clear().stroke({ width: isSelected ? 4 : 2.5, color: organism.energy <= 0 ? this.config.colorDead : color })
+          .drawRect(0, 0, this.config.cellSize, this.config.cellSize);
 
-        // Simplified DP and DV drawing for now
+        this._drawDv(dv, organism.dv, color);
+
+        dpsContainer.removeChildren();
+        const newDps = new Map();
+        if (Array.isArray(organism.dps)) {
+            organism.dps.forEach((dpPos, index) => {
+                const key = this._getCellKey(dpPos);
+                if (!newDps.has(key)) newDps.set(key, { pos: dpPos, indices: [] });
+                newDps.get(key).indices.push(index);
+            });
+        }
+
+        for(const dpData of newDps.values()) {
+            const isActive = dpData.indices.includes(organism.activeDpIndex);
+            const dpGraphics = this._drawDp(dpData.pos, color, dpData.indices, isActive, pos);
+            dpsContainer.addChild(dpGraphics);
+        }
     }
 
-    // Helper methods
+    _drawDv(g, dv, color) {
+        g.clear();
+        if (!Array.isArray(dv)) return;
+        const edgeOffset = this.config.cellSize * 0.5, cx = this.config.cellSize / 2, cy = this.config.cellSize / 2;
+        const px = cx + Math.sign(dv[0] || 0) * edgeOffset * 0.9;
+        const py = cy + Math.sign(dv[1] || 0) * edgeOffset * 0.9;
+        g.circle(px, py, this.config.cellSize * 0.1).fill(color);
+    }
+
+    _drawDp(pos, color, indices, isActive, ipPos) {
+        const container = new PIXI.Container();
+        container.position.set((pos[0] - ipPos[0]) * this.config.cellSize, (pos[1] - ipPos[1]) * this.config.cellSize);
+
+        const border = new PIXI.Graphics().stroke({ width: 2.0, color: color }).setStrokeDash(3, 3).drawRect(0, 0, this.config.cellSize, this.config.cellSize);
+        container.addChild(border);
+
+        if (isActive) {
+            const hatching = new PIXI.Graphics().stroke({width: 1.0, color: color});
+            const spacing = 4;
+            for (let i = -this.config.cellSize; i < this.config.cellSize; i += spacing) {
+                hatching.moveTo(Math.max(0, i), Math.max(0, -i)).lineTo(Math.min(this.config.cellSize, i + this.config.cellSize), Math.min(this.config.cellSize, this.config.cellSize - i));
+            }
+            container.addChild(hatching);
+        }
+
+        if (indices.length > 0) {
+            const text = new PIXI.Text({text: indices.join(','), style: {
+                fontFamily: "'Monospaced', 'Courier New'", fontSize: this.config.cellSize * 0.45,
+                fill: color, stroke: { color: 'black', width: 2, join: 'round' }, fontWeight: '900'
+            }});
+            text.anchor.set(0.5);
+            text.position.set(this.config.cellSize / 2, this.config.cellSize / 2);
+            container.addChild(text);
+        }
+        return container;
+    }
+
     processWorldState(worldState) {
         const typeToId = t => ({ CODE: 0, DATA: 1, ENERGY: 2, STRUCTURE: 3 })[t] ?? 1;
         const cells = (worldState.worldState?.cells || []).map(c => ({ ...c, type: typeToId(c.type) }));
         const organisms = (worldState.worldState?.organisms || []).map(o => {
             const details = worldState.organismDetails?.[o.id];
-            const correctActiveDpIndex = details?.internalState?.activeDpIndex ?? o.activeDpIndex ?? 0;
-            return { ...o, activeDpIndex: correctActiveDpIndex };
+            return { ...o, activeDpIndex: details?.internalState?.activeDpIndex ?? o.activeDpIndex ?? 0 };
         });
         return { cells, organisms };
     }
 
-    _getCellKey(position) {
-        return position.join('|');
-    }
-
+    _getCellKey(position) { return position.join('|'); }
     _getOrganismColor(id) {
         if (!this.organismColorMap.has(id)) {
-            const paletteIndex = (id - 1) % WorldRenderer.organismColorPalette.length;
-            this.organismColorMap.set(id, WorldRenderer.organismColorPalette[paletteIndex]);
+            this.organismColorMap.set(id, WorldRenderer.organismColorPalette[(id - 1) % WorldRenderer.organismColorPalette.length]);
         }
         return this.organismColorMap.get(id);
     }
-
     _getBackgroundColorForType(typeId) {
         const C = this.config;
         switch (typeId) {
@@ -218,10 +266,14 @@ class WorldRenderer {
             default: return C.colorEmptyBg;
         }
     }
-
-    // Dummy tooltip methods for now
-    setupTooltipEvents() {}
-    handleMouseMove(event) {}
-    showTooltip(event, cell, gridX, gridY) {}
-    hideTooltip() {}
+    _getTextColorForType(typeId) {
+        const C = this.config;
+         switch (typeId) {
+            case C.typeStructure: return C.colorStructureText;
+            case C.typeEnergy: return C.colorEnergyText;
+            case C.typeData: return C.colorDataText;
+            case C.typeCode: return C.colorCodeText;
+            default: return C.colorCodeText;
+        }
+    }
 }

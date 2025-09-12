@@ -11,7 +11,7 @@ class AppController {
             typeData: 1,
             typeEnergy: 2,
             typeStructure: 3,
-            backgroundColor: 0x0a0a14, // Use hex for Pixi
+            backgroundColor: 0x0a0a14,
             colorEmptyBg: 0x14141e,
             colorCodeBg: 0x3c5078,
             colorDataBg: 0x32323c,
@@ -24,21 +24,17 @@ class AppController {
             colorDead: 0x505050
         };
 
-        this.renderer = new WorldRenderer(this.canvas, defaultConfig, {});
+        // Pass `this` to the renderer for callbacks
+        this.renderer = new WorldRenderer(this.canvas, defaultConfig, this);
         this.sidebar = new SidebarView(document.getElementById('sidebar'), this);
         this.sidebarManager = new SidebarManager(this);
         this.toolbar = new ToolbarView(this);
         this.state = { currentTick: 0, selectedOrganismId: null, lastTickData: null, totalTicks: null };
-        this.canvas.addEventListener('click', (e) => this.onCanvasClick(e));
     }
 
     async init() {
-        // Initialize the new renderer
         await this.renderer.init();
-
-        // Load URL parameters first
         this.loadFromUrl();
-
         await this.navigateToTick(this.state.currentTick);
     }
 
@@ -60,33 +56,44 @@ class AppController {
             }
 
             if (!oldData) {
-                // First load, draw everything
                 this.renderer.drawInitial(newData);
             } else {
-                // Subsequent loads, calculate diff and apply changes
                 const changes = DiffCalculator.calculate(oldData, newData);
-                this.renderer.applyChanges(changes, newData);
+                this.renderer.applyChanges(changes);
             }
 
-            // Update the state for the next navigation
             this.state.lastTickData = newData;
 
-            // Update UI elements with the new data
-            const ids = Object.keys(newData.organismDetails || {});
-            const sel = this.state.selectedOrganismId && ids.includes(this.state.selectedOrganismId) ? this.state.selectedOrganismId : null;
-            if (sel) {
-                this.sidebar.update(newData.organismDetails[sel], 'goto');
-                this.sidebarManager.autoShow();
-                this.sidebarManager.setToggleButtonVisible(true);
-            } else {
-                this.sidebarManager.autoHide();
-                this.sidebarManager.setToggleButtonVisible(false);
-            }
+            this.updateSidebar();
             this.updateTickUi();
             this.saveToUrl();
 
         } catch (error) {
             console.error('Failed to navigate to tick:', error);
+        }
+    }
+
+    handleOrganismSelection(organismId) {
+        this.state.selectedOrganismId = String(organismId);
+        this.renderer.selectOrganism(this.state.selectedOrganismId); // Inform renderer
+        this.updateSidebar();
+        this.saveToUrl();
+    }
+
+    updateSidebar() {
+        const data = this.state.lastTickData;
+        if (!data) return;
+
+        const ids = Object.keys(data.organismDetails || {});
+        const selId = this.state.selectedOrganismId;
+
+        if (selId && ids.includes(selId)) {
+            this.sidebar.update(data.organismDetails[selId], 'goto');
+            this.sidebarManager.autoShow();
+            this.sidebarManager.setToggleButtonVisible(true);
+        } else {
+            this.sidebarManager.autoHide();
+            this.sidebarManager.setToggleButtonVisible(false);
         }
     }
 
@@ -100,28 +107,6 @@ class AppController {
         }
     }
 
-    onCanvasClick(event) {
-        // This needs to be adapted for PixiJS's coordinate system and event handling
-        // For now, we keep it simple or disable it if it causes issues.
-        // The new renderer doesn't implement picking yet.
-        console.log("Canvas click - picking not implemented in WebGL renderer yet.");
-    }
-
-    showError(message) {
-        if (window.EvoDebugger && window.EvoDebugger.statusManager) {
-            window.EvoDebugger.statusManager.showError(message);
-        } else {
-            console.error('Error:', message);
-            alert('Fehler: ' + message);
-        }
-    }
-
-    resetKeyboardEvents() {
-        if (this.toolbar && this.toolbar.handleKeyRelease) {
-            this.toolbar.handleKeyRelease();
-        }
-    }
-
     loadFromUrl() {
         const urlParams = new URLSearchParams(window.location.search);
         const tick = urlParams.get('tick');
@@ -129,14 +114,10 @@ class AppController {
 
         if (tick !== null) {
             const tickNumber = parseInt(tick, 10);
-            if (!isNaN(tickNumber) && tickNumber >= 0) {
-                this.state.currentTick = tickNumber;
-            }
+            if (!isNaN(tickNumber) && tickNumber >= 0) this.state.currentTick = tickNumber;
         }
 
-        if (organism !== null) {
-            this.state.selectedOrganismId = organism;
-        }
+        if (organism !== null) this.state.selectedOrganismId = organism;
     }
 
     saveToUrl() {
