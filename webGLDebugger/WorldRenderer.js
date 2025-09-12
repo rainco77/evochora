@@ -114,10 +114,9 @@ class WorldRenderer {
         const { container, bg, text } = graphics;
         container.position.set(cell.position[0] * this.config.cellSize, cell.position[1] * this.config.cellSize);
 
-        // FIX: Reordered fill and rect drawing
         bg.clear();
         bg.fill(this._getBackgroundColorForType(cell.type));
-        bg.rect(0, 0, this.config.cellSize, this.config.cellSize);
+        bg.drawRect(0, 0, this.config.cellSize, this.config.cellSize); // FIX: Use drawRect
 
         let cellText = '';
         if ((cell.type === this.config.typeCode && (cell.value !== 0 || cell.ownerId !== 0)) || cell.type !== this.config.typeCode) {
@@ -178,10 +177,9 @@ class WorldRenderer {
 
         container.position.set(pos[0] * this.config.cellSize, pos[1] * this.config.cellSize);
 
-        // FIX: Add a transparent fill for hit area and to ensure border renders correctly
         ip.clear();
-        ip.fill({ color: 0x000000, alpha: 0.001 }); // Transparent fill
         ip.stroke({ width: isSelected ? 4 : 2.5, color: organism.energy <= 0 ? this.config.colorDead : color });
+        ip.fill({ alpha: 0.001 }); // FIX: Use transparent fill for hit area
         ip.drawRect(0, 0, this.config.cellSize, this.config.cellSize);
 
         this._drawDv(dv, organism.dv, color);
