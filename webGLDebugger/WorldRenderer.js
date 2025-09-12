@@ -113,7 +113,12 @@ class WorldRenderer {
     _drawCell(graphics, cell) {
         const { container, bg, text } = graphics;
         container.position.set(cell.position[0] * this.config.cellSize, cell.position[1] * this.config.cellSize);
-        bg.clear().rect(0, 0, this.config.cellSize, this.config.cellSize).fill(this._getBackgroundColorForType(cell.type));
+
+        // FIX: Reordered fill and rect drawing
+        bg.clear();
+        bg.fill(this._getBackgroundColorForType(cell.type));
+        bg.rect(0, 0, this.config.cellSize, this.config.cellSize);
+
         let cellText = '';
         if ((cell.type === this.config.typeCode && (cell.value !== 0 || cell.ownerId !== 0)) || cell.type !== this.config.typeCode) {
             cellText = (cell.type === this.config.typeCode) ? (cell.opcodeName || String(cell.value)) : String(cell.value);
@@ -125,7 +130,7 @@ class WorldRenderer {
 
     // --- Organism Rendering ---
     _addOrganism(organism) {
-        if (!organism || !Array.isArray(organism.position)) return; // Safety check
+        if (!organism || !Array.isArray(organism.position)) return;
 
         const container = new PIXI.Container();
         const ip = new PIXI.Graphics();
@@ -145,7 +150,7 @@ class WorldRenderer {
     }
 
     _updateOrganism(organism) {
-        if (!organism || !Array.isArray(organism.position)) return; // Safety check
+        if (!organism || !Array.isArray(organism.position)) return;
         const graphics = this.organismGraphics.get(organism.id);
         if (graphics) {
             graphics.organism = organism;
@@ -166,14 +171,18 @@ class WorldRenderer {
     _drawOrganism(organism, graphics) {
         const { container, ip, dv, dpsContainer } = graphics;
         const pos = organism.position;
-        if (!pos) return; // Safety check
+        if (!pos) return;
 
         const color = this._getOrganismColor(organism.id);
         const isSelected = this.selectedOrganismId === String(organism.id);
 
         container.position.set(pos[0] * this.config.cellSize, pos[1] * this.config.cellSize);
-        ip.clear().stroke({ width: isSelected ? 4 : 2.5, color: organism.energy <= 0 ? this.config.colorDead : color })
-          .drawRect(0, 0, this.config.cellSize, this.config.cellSize);
+
+        // FIX: Add a transparent fill for hit area and to ensure border renders correctly
+        ip.clear();
+        ip.fill({ color: 0x000000, alpha: 0.001 }); // Transparent fill
+        ip.stroke({ width: isSelected ? 4 : 2.5, color: organism.energy <= 0 ? this.config.colorDead : color });
+        ip.drawRect(0, 0, this.config.cellSize, this.config.cellSize);
 
         this._drawDv(dv, organism.dv, color);
 
@@ -235,13 +244,9 @@ class WorldRenderer {
         g.stroke({ width: lineWidth, color: color });
         const dash = 3;
         const gap = 3;
-        // Top
         for(let i = x; i < x + width; i += dash + gap) g.moveTo(i, y).lineTo(i + dash, y);
-        // Right
         for(let i = y; i < y + height; i += dash + gap) g.moveTo(x + width, i).lineTo(x + width, i + dash);
-        // Bottom
         for(let i = x + width; i > x; i -= dash + gap) g.moveTo(i, y + height).lineTo(i - dash, y + height);
-        // Left
         for(let i = y + height; i > y; i -= dash + gap) g.moveTo(x, i).lineTo(x, i - dash);
     }
 
