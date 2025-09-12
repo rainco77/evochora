@@ -64,6 +64,13 @@ public final class DebugServer {
                     staticFiles.location = Location.EXTERNAL;
                     staticFiles.precompress = false;
                 });
+                config.staticFiles.add(staticFiles -> {
+                    staticFiles.hostedPath = "/webgl";
+                    String staticDir = Path.of(System.getProperty("user.dir"), "webGLDebugger").toAbsolutePath().toString();
+                    staticFiles.directory = staticDir;
+                    staticFiles.location = Location.EXTERNAL;
+                    staticFiles.precompress = false;
+                });
             });
 
             this.app.get("/api/tick/{tick}", ctx -> {
