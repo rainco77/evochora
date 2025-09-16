@@ -210,17 +210,17 @@ public class VMDataInstructionTest {
 
         // Erstelle einen RawOrganismState (wie in SimulationEngine.toRawState)
         java.util.List<Object> drsCopy = new java.util.ArrayList<>(testOrg.getDrs());
-        org.evochora.server.contracts.raw.RawOrganismState rawState = new org.evochora.server.contracts.raw.RawOrganismState(
+        org.evochora.datapipeline.contracts.raw.RawOrganismState rawState = new org.evochora.datapipeline.contracts.raw.RawOrganismState(
             testOrg.getId(), testOrg.getParentId(), testOrg.getBirthTick(), testOrg.getProgramId(), testOrg.getInitialPosition(),
             testOrg.getIp(), testOrg.getDv(), testOrg.getDps(), testOrg.getActiveDpIndex(), testOrg.getEr(),
             drsCopy, testOrg.getPrs(), testOrg.getFprs(), testOrg.getLrs(),
-            testOrg.getDataStack(), testOrg.getLocationStack(), new java.util.ArrayDeque<org.evochora.server.contracts.raw.SerializableProcFrame>(),
+            testOrg.getDataStack(), testOrg.getLocationStack(), new java.util.ArrayDeque<org.evochora.datapipeline.contracts.raw.SerializableProcFrame>(),
             testOrg.isDead(), testOrg.isInstructionFailed(), testOrg.getFailureReason(),
             testOrg.shouldSkipIpAdvance(), testOrg.getIpBeforeFetch(), testOrg.getDvBeforeFetch()
         );
         
         // Erstelle einen RawTickState
-        org.evochora.server.contracts.raw.RawTickState rawTickState = new org.evochora.server.contracts.raw.RawTickState(
+        org.evochora.datapipeline.contracts.raw.RawTickState rawTickState = new org.evochora.datapipeline.contracts.raw.RawTickState(
             1L, java.util.Arrays.asList(rawState), new java.util.ArrayList<>()
         );
         
@@ -232,7 +232,7 @@ public class VMDataInstructionTest {
         assertThat(json).contains("[1,0]");
 
         // Teste JSON-Deserialisierung
-        org.evochora.server.contracts.raw.RawTickState deserialized = objectMapper.readValue(json, org.evochora.server.contracts.raw.RawTickState.class);
+        org.evochora.datapipeline.contracts.raw.RawTickState deserialized = objectMapper.readValue(json, org.evochora.datapipeline.contracts.raw.RawTickState.class);
         Object dr5Deserialized = deserialized.organisms().get(0).drs().get(5);
         assertThat(dr5Deserialized).isInstanceOf(java.util.List.class);
     }

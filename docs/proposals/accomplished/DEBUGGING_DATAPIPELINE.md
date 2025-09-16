@@ -135,7 +135,7 @@ This section defines the Java `record` classes that serve as the data contracts 
 These records are designed for speed and minimal overhead. They are created by the `SimulationEngine` and written by the `PersistenceService` into the `raw.sqlite` database. They contain only raw, unprocessed data.
 
 ```java
-// Namespace: org.evochora.server.contracts.raw
+// Namespace: org.evochora.datapipeline.contracts.raw
 
 /**
  * Top-level container for all raw state data for a single tick.
@@ -184,7 +184,7 @@ public record RawCellState(
 This is the final, enriched data structure created by the `DebugIndexer`. An instance of `PreparedTickState` is serialized to a single JSON document for each tick and stored in the `debug.sqlite` database. It contains all information required by any debug client in a pre-formatted, ready-to-display format.
 
 ```java
-// Namespace: org.evochora.server.contracts.debug
+// Namespace: org.evochora.datapipeline.contracts.debug
 
 /**
 * Top-level container for all prepared debug data for a single tick.

@@ -75,10 +75,10 @@ You can control logging verbosity when running the CLI or compiling assembly fil
 **Set specific logger levels:**
 ```bash
 # Different levels for different services (use full Java class names)
-./gradlew run -Dlog.org.evochora.server.engine.SimulationEngine=DEBUG -Dlog.org.evochora.server.indexer.DebugIndexer=TRACE -Dlog.org.evochora.server.http.DebugServer=WARN
+./gradlew run -Dlog.org.evochora.datapipeline.engine.SimulationEngine=DEBUG -Dlog.org.evochora.datapipeline.indexer.DebugIndexer=TRACE -Dlog.org.evochora.datapipeline.http.DebugServer=WARN
 
 # Combine default and specific settings
-./gradlew run -Dlog.level=INFO -Dlog.org.evochora.server.engine.SimulationEngine=DEBUG -Dlog.org.evochora.server.persistence.PersistenceService=WARN
+./gradlew run -Dlog.level=INFO -Dlog.org.evochora.datapipeline.engine.SimulationEngine=DEBUG -Dlog.org.evochora.datapipeline.persistence.PersistenceService=WARN
 ```
 
 **For compilation with debug output:**
@@ -112,11 +112,11 @@ java -Dlog.level=DEBUG -jar build/libs/evochora-1.0-SNAPSHOT-cli.jar compile ass
 ### Available Loggers
 
 **For System Properties (use full Java class names):**
-- `log.org.evochora.server.engine.SimulationEngine` - Simulation engine logging
-- `log.org.evochora.server.persistence.PersistenceService` - Persistence service logging  
-- `log.org.evochora.server.indexer.DebugIndexer` - Debug indexer logging
-- `log.org.evochora.server.http.DebugServer` - Web debug server logging
-- `log.org.evochora.server.ServiceManager` - CLI interface logging
+- `log.org.evochora.datapipeline.engine.SimulationEngine` - Simulation engine logging
+- `log.org.evochora.datapipeline.persistence.PersistenceService` - Persistence service logging  
+- `log.org.evochora.datapipeline.indexer.DebugIndexer` - Debug indexer logging
+- `log.org.evochora.datapipeline.http.DebugServer` - Web debug server logging
+- `log.org.evochora.datapipeline.ServiceManager` - CLI interface logging
 
 **For CLI commands (use short aliases):**
 - `sim` - Simulation engine logging
@@ -140,13 +140,13 @@ java -Dlog.level=DEBUG -jar build/libs/evochora-1.0-SNAPSHOT-cli.jar compile ass
 ./gradlew run -Dlog.level=DEBUG
 
 # Detailed simulation logging with quiet other services
-./gradlew run -Dlog.level=WARN -Dlog.org.evochora.server.engine.SimulationEngine=TRACE
+./gradlew run -Dlog.level=WARN -Dlog.org.evochora.datapipeline.engine.SimulationEngine=TRACE
 
 # Compile with debug output to see compilation details
 ./gradlew compile -Pfile="assembly/test/main.s" -Dlog.level=DEBUG
 
 # Mixed logging levels for different services
-./gradlew run -Dlog.level=INFO -Dlog.org.evochora.server.engine.SimulationEngine=DEBUG -Dlog.org.evochora.server.indexer.DebugIndexer=TRACE -Dlog.org.evochora.server.http.DebugServer=ERROR
+./gradlew run -Dlog.level=INFO -Dlog.org.evochora.datapipeline.engine.SimulationEngine=DEBUG -Dlog.org.evochora.datapipeline.indexer.DebugIndexer=TRACE -Dlog.org.evochora.datapipeline.http.DebugServer=ERROR
 ```
 
 **JAR execution:**
@@ -161,7 +161,7 @@ java -Dlog.level=DEBUG -jar build/libs/evochora-1.0-SNAPSHOT-cli.jar
 java -jar build/libs/evochora-1.0-SNAPSHOT-cli.jar --config my-config.jsonc
 
 # Mixed logging levels (use full Java class names)
-java -Dlog.level=INFO -Dlog.org.evochora.server.engine.SimulationEngine=DEBUG -Dlog.org.evochora.server.indexer.DebugIndexer=TRACE -jar build/libs/evochora-1.0-SNAPSHOT-cli.jar
+java -Dlog.level=INFO -Dlog.org.evochora.datapipeline.engine.SimulationEngine=DEBUG -Dlog.org.evochora.datapipeline.indexer.DebugIndexer=TRACE -jar build/libs/evochora-1.0-SNAPSHOT-cli.jar
 
 # Compile assembly with debug output using JAR
 java -Dlog.level=DEBUG -jar build/libs/evochora-1.0-SNAPSHOT-cli.jar compile assembly/test/main.s

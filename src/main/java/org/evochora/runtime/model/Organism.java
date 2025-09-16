@@ -3,8 +3,8 @@ package org.evochora.runtime.model;
 import org.evochora.runtime.Config;
 import org.evochora.runtime.Simulation;
 import org.evochora.runtime.isa.Instruction;
-import org.evochora.server.contracts.raw.RawOrganismState;
-import org.evochora.server.contracts.raw.SerializableProcFrame;
+import org.evochora.datapipeline.contracts.raw.RawOrganismState;
+import org.evochora.datapipeline.contracts.raw.SerializableProcFrame;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

@@ -7,7 +7,7 @@ import java.util.Set;
 import java.util.List;
 import java.util.ArrayList;
 import org.evochora.runtime.Config;
-import org.evochora.server.contracts.raw.RawCellState;
+import org.evochora.datapipeline.contracts.raw.RawCellState;
 
 /**
  * Represents the simulation environment, managing the grid of molecules and their owners.

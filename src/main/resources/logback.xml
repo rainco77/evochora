@@ -33,7 +33,7 @@ icht ma  <!-- Evochora-spezifische Logger - Level wird zur Laufzeit konfiguriert
     <appender-ref ref="STDOUT" />
   </logger>
 
-  <logger name="org.evochora.server" additivity="false">
+  <logger name="org.evochora.datapipeline" additivity="false">
     <appender-ref ref="STDOUT" />
   </logger>
 

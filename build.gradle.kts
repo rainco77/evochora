@@ -32,22 +32,20 @@ dependencies {
 
 // Definiert die Hauptklasse für den 'run'-Task
 application {
-    mainClass.set("org.evochora.server.CommandLineInterface")
+    mainClass.set("org.evochora.datapipeline.CommandLineInterface")
 }
 
 // Konfiguriere den run-Task für interaktive Eingabe
 tasks.named<JavaExec>("run") {
     group = "application"
-    description = "Run the Evochora server CLI with interactive input"
+    description = "Run the Evochora Data Pipeline CLI with interactive input"
     standardInput = System.`in`
 }
-
-// Der runServer Task wurde entfernt - verwende stattdessen: ./gradlew run
 
 tasks.register<Jar>("cliJar") {
     archiveClassifier.set("cli")
     manifest {
-        attributes["Main-Class"] = "org.evochora.server.CommandLineInterface"
+        attributes["Main-Class"] = "org.evochora.datapipeline.CommandLineInterface"
     }
     
     // Add JVM arguments to suppress SLF4J warnings
@@ -69,7 +67,7 @@ tasks.register<Jar>("cliJar") {
 tasks.register<JavaExec>("compile") {
     group = "application"
     description = "Compile assembly file to ProgramArtifact JSON"
-    mainClass.set("org.evochora.server.CommandLineInterface")
+    mainClass.set("org.evochora.datapipeline.CommandLineInterface")
     classpath = sourceSets.main.get().runtimeClasspath
     
     args("compile")
