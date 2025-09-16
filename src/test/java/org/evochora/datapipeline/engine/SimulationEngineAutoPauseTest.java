@@ -10,8 +10,12 @@ import org.junit.jupiter.api.AfterEach;
 
 import java.util.ArrayList;
 import java.util.function.BooleanSupplier;
+import java.util.Map;
+import java.util.HashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import org.evochora.datapipeline.contracts.IQueueMessage;
+import org.evochora.datapipeline.channel.inmemory.InMemoryChannel;
 
 /**
  * Contains integration tests for auto-pause functionality in the simulation engine.
@@ -22,13 +26,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Tag("integration")
 class SimulationEngineAutoPauseTest {
 
-    private ITickMessageQueue queue;
+    private InMemoryChannel<IQueueMessage> channel;
     private SimulationEngine engine;
 
     @BeforeEach
     void setUp() {
-        queue = new InMemoryTickQueue(1000);
-        engine = new SimulationEngine(queue, new EnvironmentProperties(new int[]{10, 10}, true), 
+        Map<String, Object> channelOptions = new HashMap<>();
+        channelOptions.put("capacity", 10);
+        channel = new InMemoryChannel<>(channelOptions);
+        engine = new SimulationEngine(channel, new EnvironmentProperties(new int[]{10, 10}, true), 
              new ArrayList<>(), new ArrayList<>());
     }
 

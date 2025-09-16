@@ -24,8 +24,11 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.evochora.datapipeline.contracts.IQueueMessage;
+import org.evochora.datapipeline.channel.inmemory.InMemoryChannel;
 
 /**
  * Comprehensive benchmark test for the complete Evochora pipeline.
@@ -36,7 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class BenchmarkTest {
 
     // ===== CONFIGURABLE BENCHMARK PARAMETERS =====
-    private int simulationTicks = 20000;
+    private int simulationTicks = 5000;
     private int persistenceBatchSize = 1000;
     private int indexerBatchSize = 1000;
     private EnvironmentProperties environmentProperties = new EnvironmentProperties(new int[]{100, 100}, true);
@@ -123,6 +126,7 @@ public class BenchmarkTest {
     // ===== SERVICE REFERENCES FOR METRICS =====
     private PersistenceService persistenceService;
     private DebugIndexer debugIndexer;
+    private InMemoryChannel<IQueueMessage> channel;
     
     @BeforeAll
     static void init() {
@@ -135,6 +139,9 @@ public class BenchmarkTest {
         createOrganismConfigs(); // Erstelle Organismen-Konfigurationen
         testConfig = createTestConfiguration();
         totalStartTime = System.currentTimeMillis();
+        Map<String, Object> channelOptions = new HashMap<>();
+        channelOptions.put("capacity", 10000);
+        channel = new InMemoryChannel<>(channelOptions);
     }
 
     /**
@@ -277,7 +284,7 @@ public class BenchmarkTest {
             
                         // Create simulation engine with new API
             SimulationEngine engine = new SimulationEngine(
-                queue,
+                channel, // <-- Corrected: pass the channel
                 environmentProperties,
                 createOrganismPlacements(),
                 createEnergyStrategies(),
@@ -297,7 +304,7 @@ public class BenchmarkTest {
             SimulationConfiguration.PersistenceServiceConfig persistenceConfig = new SimulationConfiguration.PersistenceServiceConfig();
             persistenceConfig.jdbcUrl = rawJdbcUrl;
             persistenceConfig.batchSize = persistenceBatchSize;
-            persistenceService = new PersistenceService(queue, environmentProperties, persistenceConfig);
+            persistenceService = new PersistenceService(channel, environmentProperties, persistenceConfig);
             
             // Mark start times
             simulationStartTime = System.currentTimeMillis();

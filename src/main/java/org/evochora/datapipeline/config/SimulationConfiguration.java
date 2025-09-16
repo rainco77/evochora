@@ -38,20 +38,25 @@ public final class SimulationConfiguration {
         public List<int[]> positions;
     }
 
-    public static final class PipelineConfig {
+    public static class PipelineConfig {
         public SimulationServiceConfig simulation;
-        public IndexerServiceConfig indexer;
         public PersistenceServiceConfig persistence;
+        public IndexerServiceConfig indexer;
         public ServerServiceConfig server;
         public LoggingConfig logging;
+        public Map<String, ChannelConfig> channels;
     }
 
-    public static final class SimulationServiceConfig {
-        public Boolean autoStart;
-        public String outputPath;
+    public static class ChannelConfig {
+        public String className; // <-- Corrected back to "className"
+        public Map<String, Object> options; // <-- Replaced "capacity"
+    }
+
+    public static class SimulationServiceConfig {
+        public Boolean autoStart = true;
         public int[] checkpointPauseTicks; // Array of tick values where simulation should checkpoint-pause
-        public Boolean skipProgramArtefact; // Whether to skip ProgramArtifact features (default: false)
-        public Integer maxMessageCount; // Maximum number of messages in queue (default: 10000)
+        public Boolean skipProgramArtefact = false; // Whether to skip ProgramArtifact features (default: false)
+        public String outputChannel;
     }
 
     public static final class IndexerServiceConfig {
@@ -65,8 +70,10 @@ public final class SimulationConfiguration {
         public MemoryOptimizationConfig memoryOptimization = new MemoryOptimizationConfig(); // Default: enabled
     }
 
-    public static final class PersistenceServiceConfig {
-        public boolean autoStart;
+    public static class PersistenceServiceConfig {
+        public Boolean autoStart = true;
+        public String inputChannel;
+        public String outputPath = "runs/"; // <-- ADDED
         public int batchSize = 1000; // Default batch size
         public String jdbcUrl;
         public DatabaseConfig database = new DatabaseConfig(); // Default database settings
@@ -125,13 +132,8 @@ public final class SimulationConfiguration {
      * Database performance configuration for SQLite optimizations.
      */
     public static final class DatabaseConfig {
-        /** SQLite cache size in pages (default: 5000) */
         public int cacheSize = 5000;
-        
-        /** Memory-mapped I/O size in bytes (default: 8MB) */
-        public long mmapSize = 8388608L;
-        
-        /** SQLite page size in bytes (default: 4096) */
+        public long mmapSize = 8388608;
         public int pageSize = 4096;
     }
 

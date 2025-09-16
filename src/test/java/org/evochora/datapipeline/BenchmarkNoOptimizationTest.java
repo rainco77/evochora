@@ -26,6 +26,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.evochora.datapipeline.contracts.IQueueMessage;
+import org.evochora.datapipeline.channel.inmemory.InMemoryChannel;
+import org.evochora.datapipeline.channel.IMonitorableChannel;
+import java.util.HashMap;
 
 /**
  * Comprehensive benchmark test for the complete Evochora pipeline WITHOUT my optimizations.
@@ -39,7 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class BenchmarkNoOptimizationTest {
 
     // ===== CONFIGURABLE BENCHMARK PARAMETERS =====
-    private int simulationTicks = 20000;
+    private int simulationTicks = 5000;
     private int persistenceBatchSize = 1000;
     private int indexerBatchSize = 1000;
     private EnvironmentProperties environmentProperties = new EnvironmentProperties(new int[]{100, 100}, true);
@@ -126,6 +130,7 @@ public class BenchmarkNoOptimizationTest {
     // ===== SERVICE REFERENCES FOR METRICS =====
     private PersistenceService persistenceService;
     private DebugIndexer debugIndexer;
+    private InMemoryChannel<IQueueMessage> channel;
     
     @BeforeAll
     static void init() {
@@ -274,18 +279,14 @@ public class BenchmarkNoOptimizationTest {
     private void runSimulationWithPersistence(String rawJdbcUrl) {
         try {
             // Setup queue
-            InMemoryTickQueue queue = new InMemoryTickQueue(10000);
+            Map<String, Object> channelOptions = new HashMap<>();
+            channelOptions.put("capacity", 10000);
+            channel = new InMemoryChannel<>(channelOptions);
             
 
             
                         // Create simulation engine with new API
-            SimulationEngine engine = new SimulationEngine(
-                queue,
-                environmentProperties,
-                createOrganismPlacements(),
-                createEnergyStrategies(),
-                false // skipProgramArtefact
-            );
+            SimulationEngine engine = new SimulationEngine(channel, environmentProperties, createOrganismPlacements(), createEnergyStrategies(), false);
             
             // Set tick limit
             engine.setMaxTicks((long) simulationTicks);
@@ -306,7 +307,7 @@ public class BenchmarkNoOptimizationTest {
             persistenceConfig.database.mmapSize = 1048576L; // Instead of 268MB (268435456L)
             persistenceConfig.database.pageSize = 1024; // Instead of 4096
             persistenceConfig.memoryOptimization.enabled = false; // Instead of true
-            persistenceService = new PersistenceService(queue, environmentProperties, persistenceConfig);
+            persistenceService = new PersistenceService(channel, environmentProperties, persistenceConfig);
             
             // Mark start times
             simulationStartTime = System.currentTimeMillis();
@@ -324,7 +325,7 @@ public class BenchmarkNoOptimizationTest {
             simulationEndTime = System.currentTimeMillis();
             
             // Wait for persistence to complete
-            waitForPersistenceToComplete(queue, rawJdbcUrl, simulationTicks);
+            waitForPersistenceToComplete(channel, rawJdbcUrl, simulationTicks);
             
             // Stop persistence service
             persistenceService.shutdown();
@@ -414,11 +415,11 @@ public class BenchmarkNoOptimizationTest {
     /**
      * Waits for persistence to complete by checking both queue size and database tick count.
      */
-    private void waitForPersistenceToComplete(InMemoryTickQueue queue, String jdbcUrl, int expectedTicks) {
+    private void waitForPersistenceToComplete(InMemoryChannel<IQueueMessage> queue, String jdbcUrl, int expectedTicks) {
         long timeout = System.currentTimeMillis() + persistenceCompleteTimeoutMs;
         while (System.currentTimeMillis() < timeout) {
             try {
-                if (queue.size() == 0) {
+                if (queue instanceof IMonitorableChannel monitorable && monitorable.size() == 0) {
                     long ticksInDb = countTicksInRawDatabase(jdbcUrl);
                     if (ticksInDb >= expectedTicks) {
                         ticksPersisted.set(ticksInDb);

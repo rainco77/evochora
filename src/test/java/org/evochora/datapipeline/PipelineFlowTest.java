@@ -2,7 +2,6 @@ package org.evochora.datapipeline;
 
 import org.evochora.datapipeline.engine.SimulationEngine;
 import org.evochora.datapipeline.engine.OrganismPlacement;
-import org.evochora.datapipeline.queue.InMemoryTickQueue;
 import org.evochora.datapipeline.persistence.PersistenceService;
 import org.evochora.datapipeline.indexer.DebugIndexer;
 import org.evochora.datapipeline.http.DebugServer;
@@ -11,8 +10,8 @@ import org.evochora.runtime.model.EnvironmentProperties;
 import org.evochora.datapipeline.config.SimulationConfiguration;
 import org.evochora.compiler.Compiler;
 import org.evochora.compiler.api.ProgramArtifact;
-import org.evochora.runtime.worldgen.IEnergyDistributionCreator;
 import java.util.Map;
+import java.util.HashMap;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -32,8 +31,12 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.io.IOException;
 
 import static org.junit.jupiter.api.Assertions.*;
+import org.evochora.datapipeline.contracts.IQueueMessage;
+import org.evochora.datapipeline.channel.inmemory.InMemoryChannel;
+import org.evochora.datapipeline.channel.IMonitorableChannel;
 
 /**
  * Clean, systematic test for the complete pipeline data flow.
@@ -57,7 +60,8 @@ public class PipelineFlowTest {
     private PersistenceService persistenceService;
     private DebugIndexer debugIndexer;
     private DebugServer debugServer;
-    private InMemoryTickQueue queue;
+    private InMemoryChannel<IQueueMessage> channel; // Add the channel
+    private SimulationConfiguration config;
     
     // ===== TEST DATA =====
     private String rawDbPath;
@@ -70,40 +74,48 @@ public class PipelineFlowTest {
     }
     
     @BeforeEach
-    void setUp(@TempDir Path tempDir) {
+    void setUp(@TempDir Path tempDir) throws IOException {
         Instruction.init();
+
+        // Create a full, valid configuration
+        config = new SimulationConfiguration();
+        config.simulation = new SimulationConfiguration.SimulationConfig();
+        config.simulation.environment = new SimulationConfiguration.EnvironmentConfig();
+        config.simulation.environment.shape = environmentProperties.getWorldShape();
+        config.simulation.environment.toroidal = environmentProperties.isToroidal();
+
+        config.pipeline = new SimulationConfiguration.PipelineConfig();
         
+        config.pipeline.persistence = new SimulationConfiguration.PersistenceServiceConfig();
+        config.pipeline.persistence.database = new SimulationConfiguration.DatabaseConfig();
+        config.pipeline.persistence.batchSize = persistenceBatchSize;
+        config.pipeline.persistence.memoryOptimization = new SimulationConfiguration.MemoryOptimizationConfig();
+        
+        config.pipeline.indexer = new SimulationConfiguration.IndexerServiceConfig();
+        config.pipeline.indexer.batchSize = indexerBatchSize;
+        config.pipeline.indexer.compression = new SimulationConfiguration.CompressionConfig();
+        config.pipeline.indexer.parallelProcessing = new SimulationConfiguration.ParallelProcessingConfig();
+        config.pipeline.indexer.memoryOptimization = new SimulationConfiguration.MemoryOptimizationConfig();
+        config.pipeline.indexer.database = new SimulationConfiguration.DatabaseConfig();
+
         // Create in-memory databases
         String uniqueDbName = "pipeline_test_" + System.currentTimeMillis();
-        this.rawDbPath = "jdbc:sqlite:file:" + uniqueDbName + "?mode=memory&cache=shared&journal_mode=WAL&synchronous=NORMAL&locking_mode=NORMAL&cache_size=10000&temp_store=MEMORY&busy_timeout=30000&read_uncommitted=true";
-        this.debugDbPath = "jdbc:sqlite:file:" + uniqueDbName + "_debug?mode=memory&cache=shared&journal_mode=WAL&synchronous=NORMAL&locking_mode=NORMAL&cache_size=10000&temp_store=MEMORY&busy_timeout=30000&read_uncommitted=true";
+        this.rawDbPath = "jdbc:sqlite:file:" + uniqueDbName + "?mode=memory&cache=shared";
+        this.debugDbPath = "jdbc:sqlite:file:" + uniqueDbName + "_debug?mode=memory&cache=shared";
+        config.pipeline.persistence.jdbcUrl = this.rawDbPath;
         
-        // Create queue
-        queue = new InMemoryTickQueue(1000);
-        
-        // Create organism placements with simple NOP program
+        // Services must be created AFTER the JDBC URL is known
         organismPlacements = createTestOrganisms();
+        Map<String, Object> channelOptions = new HashMap<>();
+        channelOptions.put("capacity", 10000); // High capacity for pipeline tests
+        channel = new InMemoryChannel<>(channelOptions);
         
-        // Create services
-        List<IEnergyDistributionCreator> energyStrategies = new ArrayList<>();
+        persistenceService = new PersistenceService(channel, environmentProperties, config.pipeline.persistence);
+        simulationEngine = new SimulationEngine(channel, environmentProperties, organismPlacements, new ArrayList<>(), false);
         
-        simulationEngine = new SimulationEngine(
-            queue, 
-            environmentProperties,
-            organismPlacements,
-            energyStrategies,
-            false // Don't skip program artifacts
-        );
-        
-        // maxTicks will be set by individual tests as needed
-        
-        SimulationConfiguration.PersistenceServiceConfig persistenceConfig = new SimulationConfiguration.PersistenceServiceConfig();
-        persistenceConfig.jdbcUrl = rawDbPath;
-        persistenceConfig.batchSize = persistenceBatchSize;
-        persistenceService = new PersistenceService(queue, environmentProperties, persistenceConfig);
-        SimulationConfiguration.IndexerServiceConfig indexerConfig = new SimulationConfiguration.IndexerServiceConfig();
-        indexerConfig.batchSize = indexerBatchSize;
-        debugIndexer = new DebugIndexer(rawDbPath, debugDbPath, indexerConfig);
+        // CORRECTED: The DebugIndexer must use the EXACT same database path as the PersistenceService.
+        // We get it from the service after it has been created to ensure it's the correct one.
+        debugIndexer = new DebugIndexer(persistenceService.getJdbcUrl(), this.debugDbPath, config.pipeline.indexer);
         debugServer = new DebugServer();
     }
     
@@ -156,13 +168,6 @@ public class PipelineFlowTest {
     }
     
     /**
-     * Helper method to wait for queue to be processed.
-     */
-    private void waitForQueueProcessed(InMemoryTickQueue queue, int threshold, long timeoutMs) throws InterruptedException {
-        waitForCondition(() -> queue.size() < threshold, timeoutMs, "queue to be processed below threshold " + threshold);
-    }
-    
-    /**
      * Waits for the simulation engine to complete all ticks.
      */
     private void waitForSimulationToComplete() throws InterruptedException {
@@ -177,7 +182,7 @@ public class PipelineFlowTest {
         long expectedLastPersistedTick = simulationTicks - 1; // getLastPersistedTick() returns last persisted tick (0-based)
         
         while (System.currentTimeMillis() < timeout) {
-            if (queue.size() == 0) {
+            if (channel.size() == 0) {
                 long lastPersistedTick = persistenceService.getLastPersistedTick();
                 if (lastPersistedTick == expectedLastPersistedTick) {
                     return;
@@ -239,7 +244,9 @@ public class PipelineFlowTest {
         waitForIndexerToComplete();
         
         // 8. Verify final state - all ticks processed and queue empty
-        assertTrue(queue.size() < 5, "Queue should be mostly empty after processing, but size is: " + queue.size());
+        if (channel instanceof IMonitorableChannel monitorable) {
+            assertTrue(monitorable.size() < 5, "Queue should be mostly empty after processing, but size is: " + channel.size());
+        }
         
         // 9. Verify all services processed the expected number of ticks
         // SimulationEngine: should have completed (isRunning() = false)
@@ -271,7 +278,7 @@ public class PipelineFlowTest {
     void testPipelinePauseResume() throws Exception {
         // 1. Create services without maxTicks (for pause/resume testing)
         SimulationEngine pauseTestEngine = new SimulationEngine(
-            queue,
+            channel,
             environmentProperties,
             createTestOrganisms(),
             new ArrayList<>(),
@@ -282,7 +289,7 @@ public class PipelineFlowTest {
         SimulationConfiguration.PersistenceServiceConfig pauseTestConfig = new SimulationConfiguration.PersistenceServiceConfig();
         pauseTestConfig.jdbcUrl = rawDbPath;
         pauseTestConfig.batchSize = persistenceBatchSize;
-        PersistenceService pauseTestPersistence = new PersistenceService(queue, environmentProperties, pauseTestConfig);
+        PersistenceService pauseTestPersistence = new PersistenceService(channel, environmentProperties, pauseTestConfig); // Use the channel
         SimulationConfiguration.IndexerServiceConfig pauseTestIndexerConfig = new SimulationConfiguration.IndexerServiceConfig();
         pauseTestIndexerConfig.batchSize = indexerBatchSize;
         DebugIndexer pauseTestIndexer = new DebugIndexer(rawDbPath, debugDbPath, pauseTestIndexerConfig);
@@ -357,7 +364,7 @@ public class PipelineFlowTest {
         
         // 2. Create services with file-based databases and maxTicks = 100
         SimulationEngine shutdownTestEngine = new SimulationEngine(
-            queue,
+            channel,
             environmentProperties,
             createTestOrganisms(),
             new ArrayList<>(),
@@ -368,7 +375,7 @@ public class PipelineFlowTest {
         SimulationConfiguration.PersistenceServiceConfig shutdownTestConfig = new SimulationConfiguration.PersistenceServiceConfig();
         shutdownTestConfig.jdbcUrl = testRawDbPath;
         shutdownTestConfig.batchSize = persistenceBatchSize;
-        PersistenceService shutdownTestPersistence = new PersistenceService(queue, environmentProperties, shutdownTestConfig);
+        PersistenceService shutdownTestPersistence = new PersistenceService(channel, environmentProperties, shutdownTestConfig); // Use the channel
         SimulationConfiguration.IndexerServiceConfig shutdownTestIndexerConfig = new SimulationConfiguration.IndexerServiceConfig();
         shutdownTestIndexerConfig.batchSize = indexerBatchSize;
         DebugIndexer shutdownTestIndexer = new DebugIndexer(testRawDbPath, testDebugDbPath, shutdownTestIndexerConfig);
@@ -458,7 +465,7 @@ public class PipelineFlowTest {
         }, 2000, "Debug database to contain " + expectedTicks + " ticks");
 
         // Verify no data is left in queue
-        assertEquals(0, queue.size(), "Queue should be empty after shutdown");
+        assertEquals(0, channel.size(), "Queue should be empty after shutdown");
 
         // Data integrity verification completed successfully
     }
@@ -504,31 +511,36 @@ public class PipelineFlowTest {
         // 3. Wait for simulation to complete (50 ticks)
         waitForCondition(() -> !simulationEngine.isRunning(), 3000, "SimulationEngine to complete");
 
-        // 4. Wait for all ticks to be processed
+        // 4. Wait for persistence to report it has processed all ticks from the channel
         waitForCondition(() -> {
             long lastPersistedTick = persistenceService.getLastPersistedTick();
             return lastPersistedTick == 49; // 0-based indexing: 50 ticks = 0-49
         }, 2000, "PersistenceService to process all 50 ticks");
 
+        // 5. CRITICAL: Flush the persistence service to ensure all data is written to the database.
+        // This makes the raw data fully available for the indexer without closing the in-memory DB.
+        persistenceService.flush();
+
+        // 6. Now that the raw database is complete, wait for the indexer to process all ticks.
         waitForCondition(() -> {
             long lastProcessedTick = debugIndexer.getLastProcessedTick();
             return lastProcessedTick == 49; // 0-based indexing: 50 ticks = 0-49
         }, 2000, "DebugIndexer to process all 50 ticks");
 
-        // 5. Verify that services have processed data correctly (using service methods)
+        // 7. Verify that services have processed data correctly (using service methods)
         // Note: Service methods work even when DB is closed (they use internal state)
         assertTrue(debugIndexer.getLastProcessedTick() >= 49, "DebugIndexer should have processed all ticks");
-        assertTrue(persistenceService.getLastPersistedTick() >= 49, "PersistenceService should have processed all ticks");
+        assertEquals(49, persistenceService.getLastPersistedTick(), "PersistenceService should have processed all ticks");
         
-        // 6. Verify program artifacts and metadata content using service methods
+        // 8. Verify program artifacts and metadata content using service methods
         verifyProgramArtifactsAndMetadataUsingServices();
 
-        // 7. Shutdown all services
+        // 9. Shutdown remaining services
         simulationEngine.shutdown();
         persistenceService.shutdown();
         debugIndexer.shutdown();
 
-        // 8. Wait for services to be stopped
+        // 10. Wait for services to be stopped
         waitForCondition(() -> !simulationEngine.isRunning(), 3000, "SimulationEngine to stop");
         waitForCondition(() -> !persistenceService.isRunning(), 3000, "PersistenceService to stop");
         waitForCondition(() -> !debugIndexer.isRunning(), 3000, "DebugIndexer to stop");

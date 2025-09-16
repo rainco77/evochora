@@ -8,18 +8,25 @@ import org.evochora.runtime.model.EnvironmentProperties;
 import org.evochora.datapipeline.config.SimulationConfiguration;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.BooleanSupplier;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.evochora.datapipeline.contracts.IQueueMessage;
+import org.evochora.datapipeline.channel.inmemory.InMemoryChannel;
 
 /**
  * Contains integration tests for the {@link PersistenceService}.
@@ -27,6 +34,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * consume tick data from a queue and correctly persist it to a database.
  */
 class PersistenceServiceTest {
+
+    private InMemoryChannel<IQueueMessage> channel;
+    private PersistenceService persistenceService;
+
+    @BeforeEach
+    void setUp() throws IOException, SQLException {
+        Map<String, Object> channelOptions = new HashMap<>();
+        channelOptions.put("capacity", 100);
+        channel = new InMemoryChannel<>(channelOptions);
+        // Use the available constructor with worldShape and batchSize
+        SimulationConfiguration.PersistenceServiceConfig config = new SimulationConfiguration.PersistenceServiceConfig();
+        config.jdbcUrl = "jdbc:sqlite:file:memdb_persistence?mode=memory&cache=shared";
+        config.batchSize = 1;
+        EnvironmentProperties envProps = new EnvironmentProperties(new int[]{10, 10}, true);
+        persistenceService = new PersistenceService(channel, envProps, config);
+        persistenceService.start();
+    }
 
     /**
      * Wait for a condition to be true, checking every 10ms
@@ -66,26 +90,19 @@ class PersistenceServiceTest {
     @Test
     @Tag("unit")
     void writesRawTickStateRows() throws Exception {
-        ITickMessageQueue q = new InMemoryTickQueue(1000);
-        // Use the available constructor with worldShape and batchSize
-        SimulationConfiguration.PersistenceServiceConfig config = new SimulationConfiguration.PersistenceServiceConfig();
-        config.jdbcUrl = "jdbc:sqlite:file:memdb_persistence?mode=memory&cache=shared";
-        config.batchSize = 1;
-        PersistenceService persist = new PersistenceService(q, new EnvironmentProperties(new int[]{10, 10}, true), config);
-        persist.start();
-
         var rawCell = new RawCellState(new int[]{1, 2}, 42, 1);
         var rawTick = new RawTickState(10L, Collections.emptyList(), List.of(rawCell));
 
-        q.put(rawTick);
+        // Send directly to the channel
+        channel.send(rawTick);
 
         assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
-            while (persist.getLastPersistedTick() < 10L) {
+            while (persistenceService.getLastPersistedTick() < 10L) {
                 Thread.sleep(50);
             }
         }, "PersistenceService did not process the tick in time.");
 
-        try (Connection c = DriverManager.getConnection(persist.getJdbcUrl())) {
+        try (Connection c = DriverManager.getConnection(persistenceService.getJdbcUrl())) {
             ResultSet rsTick = c.createStatement().executeQuery("SELECT COUNT(*) FROM raw_ticks WHERE tick_number=10");
             assertThat(rsTick.next()).isTrue();
             assertThat(rsTick.getInt(1)).isEqualTo(1);
@@ -100,11 +117,11 @@ class PersistenceServiceTest {
             assertThat(json).contains("\"ownerId\":1");
         }
 
-        persist.shutdown();
+        persistenceService.shutdown();
         
         // Wait for shutdown to complete
         Thread.sleep(1000);
-        assertThat(persist.isRunning()).isFalse();
+        assertThat(persistenceService.isRunning()).isFalse();
     }
 
 }

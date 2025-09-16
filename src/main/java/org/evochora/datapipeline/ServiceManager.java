@@ -4,8 +4,11 @@ import org.evochora.datapipeline.engine.SimulationEngine;
 import org.evochora.datapipeline.persistence.PersistenceService;
 import org.evochora.datapipeline.indexer.DebugIndexer;
 import org.evochora.datapipeline.http.DebugServer;
-import org.evochora.datapipeline.queue.ITickMessageQueue;
 import org.evochora.datapipeline.config.SimulationConfiguration;
+import org.evochora.datapipeline.channel.IInputChannel;
+import org.evochora.datapipeline.channel.IOutputChannel;
+import org.evochora.datapipeline.channel.ChannelFactory;
+import org.evochora.datapipeline.contracts.IQueueMessage;
 import org.evochora.runtime.model.EnvironmentProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,12 +41,12 @@ public final class ServiceManager {
     private final AtomicBoolean serverRunning = new AtomicBoolean(false);
     
     // Configuration
-    private final ITickMessageQueue queue;
+    private final ChannelFactory channelFactory;
     private final SimulationConfiguration config;
     
-    public ServiceManager(ITickMessageQueue queue, SimulationConfiguration config) {
-        this.queue = queue;
+    public ServiceManager(SimulationConfiguration config) {
         this.config = config;
+        this.channelFactory = new ChannelFactory(config.pipeline);
         
         // Check autoStart configuration and start services automatically
         log.debug("Checking autoStart configuration...");
@@ -507,8 +510,13 @@ public final class ServiceManager {
             }
             
             // Create SimulationEngine with new API
+            @SuppressWarnings("unchecked")
+            IOutputChannel<IQueueMessage> channel = channelFactory.<IOutputChannel<IQueueMessage>>getOrCreateChannel(config.pipeline.simulation.outputChannel)
+                .map(c -> (IOutputChannel<IQueueMessage>) c)
+                .orElseThrow(() -> new IllegalStateException("Failed to create or get channel: " + config.pipeline.simulation.outputChannel));
+            
             SimulationEngine engine = new SimulationEngine(
-                queue, 
+                channel, 
                 envProps,
                 organismPlacements,
                 energyStrategies,
@@ -550,7 +558,15 @@ public final class ServiceManager {
     private void startPersistence() {
         if (persistenceService.get() == null || !persistenceRunning.get()) {
             EnvironmentProperties envProps = new EnvironmentProperties(config.simulation.environment.shape, config.simulation.environment.toroidal);
-            PersistenceService service = new PersistenceService(queue, envProps, config.pipeline.persistence);
+            
+            // Create an InMemoryChannel that WRAPS the existing queue
+            // This is a temporary bridge to connect the old world (queue) with the new (channel)
+            @SuppressWarnings("unchecked")
+            IInputChannel<IQueueMessage> channel = channelFactory.<IInputChannel<IQueueMessage>>getOrCreateChannel(config.pipeline.persistence.inputChannel)
+                .map(c -> (IInputChannel<IQueueMessage>) c)
+                .orElseThrow(() -> new IllegalStateException("Failed to create or get channel: " + config.pipeline.persistence.inputChannel));
+            
+            PersistenceService service = new PersistenceService(channel, envProps, config.pipeline.persistence);
             
             persistenceService.set(service);
             service.start();

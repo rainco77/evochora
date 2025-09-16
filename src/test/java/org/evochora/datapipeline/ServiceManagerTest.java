@@ -1,6 +1,5 @@
 package org.evochora.datapipeline;
 
-import org.evochora.datapipeline.queue.InMemoryTickQueue;
 import org.evochora.datapipeline.config.SimulationConfiguration;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -10,6 +9,8 @@ import org.junit.jupiter.api.Tag;
 
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import java.util.ArrayList;
+import java.util.HashMap;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -22,37 +23,62 @@ import static org.junit.jupiter.api.Assertions.*;
 class ServiceManagerTest {
 
     private ServiceManager serviceManager;
-    private InMemoryTickQueue queue;
     private SimulationConfiguration config;
 
     @BeforeEach
     void setUp() {
-        queue = new InMemoryTickQueue(10000);
         config = new SimulationConfiguration();
-        
-        // Initialize simulation config
+
+        // 1. Top-level simulation config (needed for world shape, organisms etc.)
         config.simulation = new SimulationConfiguration.SimulationConfig();
         config.simulation.environment = new SimulationConfiguration.EnvironmentConfig();
         config.simulation.environment.shape = new int[]{10, 10};
-        config.simulation.environment.toroidal = true;
-        config.simulation.seed = 12345L;
+        config.simulation.organisms = new ArrayList<>(); // MUST be initialized
 
-        config.simulation.energyStrategies = new java.util.ArrayList<>();
-        
-        // Initialize pipeline config
+        // 2. Pipeline config
         config.pipeline = new SimulationConfiguration.PipelineConfig();
-        config.pipeline.simulation = new SimulationConfiguration.SimulationServiceConfig();
-        config.pipeline.persistence = new SimulationConfiguration.PersistenceServiceConfig();
-        config.pipeline.indexer = new SimulationConfiguration.IndexerServiceConfig();
-        config.pipeline.server = new SimulationConfiguration.ServerServiceConfig();
         
+        // 3. Channel definition
+        config.pipeline.channels = new HashMap<>();
+        SimulationConfiguration.ChannelConfig channelConfig = new SimulationConfiguration.ChannelConfig();
+        channelConfig.className = "org.evochora.datapipeline.channel.inmemory.InMemoryChannel";
+        channelConfig.options = new HashMap<>();
+        channelConfig.options.put("capacity", 100);
+        config.pipeline.channels.put("test-channel", channelConfig);
+        
+        // 4. Fully initialize service configurations
+        config.pipeline.simulation = new SimulationConfiguration.SimulationServiceConfig();
+        config.pipeline.simulation.outputChannel = "test-channel";
+        config.pipeline.simulation.autoStart = false;
+
+        config.pipeline.persistence = new SimulationConfiguration.PersistenceServiceConfig();
+        config.pipeline.persistence.inputChannel = "test-channel";
+        config.pipeline.persistence.autoStart = false;
+        config.pipeline.persistence.database = new SimulationConfiguration.DatabaseConfig();
+        config.pipeline.persistence.memoryOptimization = new SimulationConfiguration.MemoryOptimizationConfig();
+
+        config.pipeline.indexer = new SimulationConfiguration.IndexerServiceConfig();
+        config.pipeline.indexer.autoStart = false;
+        config.pipeline.indexer.database = new SimulationConfiguration.DatabaseConfig();
+        config.pipeline.indexer.memoryOptimization = new SimulationConfiguration.MemoryOptimizationConfig();
+        config.pipeline.indexer.parallelProcessing = new SimulationConfiguration.ParallelProcessingConfig();
+        config.pipeline.indexer.compression = new SimulationConfiguration.CompressionConfig();
+
+        config.pipeline.server = new SimulationConfiguration.ServerServiceConfig();
+        config.pipeline.server.autoStart = false;
+
         // Set default values with in-memory databases for faster tests
+        // Use unique DB names to ensure test isolation.
+        String dbName = "servicemanager_test_" + System.currentTimeMillis();
+        config.pipeline.persistence.jdbcUrl = "jdbc:sqlite:file:" + dbName + "_raw?mode=memory&cache=shared";
+        // Note: DebugIndexer gets its input path from the PersistenceService,
+        // but it needs a defined output path for its own database.
+        config.pipeline.indexer.outputPath = "jdbc:sqlite:file:" + dbName + "_debug?mode=memory&cache=shared";
         config.pipeline.persistence.batchSize = 1000;
-        config.pipeline.persistence.jdbcUrl = "jdbc:sqlite::memory:";
         config.pipeline.indexer.batchSize = 1000;
         config.pipeline.server.port = 0;
         
-        serviceManager = new ServiceManager(queue, config);
+        serviceManager = new ServiceManager(config);
     }
 
     @AfterEach
@@ -132,7 +158,7 @@ class ServiceManagerTest {
             () -> {
                 String status = serviceManager.getStatus();
                 return status.contains("sim") && status.contains("started") &&
-                       status.contains("persist") && status.contains("paused") &&
+                       status.contains("persist") && status.contains("started") &&
                        status.contains("indexer") && status.contains("started") &&
                        status.contains("web") && status.contains("started");
             },
@@ -383,7 +409,7 @@ class ServiceManagerTest {
         config.pipeline.persistence.batchSize = 500;
         config.pipeline.indexer.batchSize = 2000;
         
-        ServiceManager customManager = new ServiceManager(queue, config);
+        ServiceManager customManager = new ServiceManager(config);
         assertNotNull(customManager);
         
         customManager.stopAll();

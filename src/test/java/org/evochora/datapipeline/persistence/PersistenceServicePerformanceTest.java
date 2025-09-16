@@ -1,6 +1,5 @@
 package org.evochora.datapipeline.persistence;
 
-import org.evochora.datapipeline.queue.InMemoryTickQueue;
 import org.evochora.datapipeline.contracts.raw.RawTickState;
 import org.evochora.datapipeline.contracts.raw.RawOrganismState;
 import org.evochora.datapipeline.contracts.raw.RawCellState;
@@ -10,16 +9,18 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.Tag;
 
-import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.LinkedList;
+import java.util.Map;
+import java.util.HashMap;
 
 import static org.junit.jupiter.api.Assertions.*;
+import org.evochora.datapipeline.contracts.IQueueMessage;
+import org.evochora.datapipeline.channel.inmemory.InMemoryChannel;
 
 /**
  * Contains integration tests for the {@link PersistenceService}, focusing on performance and behavior under load.
@@ -29,22 +30,22 @@ import static org.junit.jupiter.api.Assertions.*;
 class PersistenceServicePerformanceTest {
 
     private PersistenceService persistenceService;
-    private InMemoryTickQueue queue;
-    private Path tempDir;
+    private InMemoryChannel<IQueueMessage> channel;
     private String dbPath;
     private static final int BATCH_SIZE = 1000;
 
     @BeforeEach
-    void setUp(@TempDir Path tempDir) throws Exception {
-        this.tempDir = tempDir;
+    void setUp() throws Exception {
         // Use temporary SQLite for faster tests
         this.dbPath = "jdbc:sqlite:file:memdb_perf?mode=memory&cache=shared";
         
-        queue = new InMemoryTickQueue(1000);
+        Map<String, Object> channelOptions = new HashMap<>();
+        channelOptions.put("capacity", 1000);
+        channel = new InMemoryChannel<>(channelOptions);
         SimulationConfiguration.PersistenceServiceConfig config = new SimulationConfiguration.PersistenceServiceConfig();
         config.jdbcUrl = dbPath;
         config.batchSize = BATCH_SIZE;
-        persistenceService = new PersistenceService(queue, new EnvironmentProperties(new int[]{100, 30}, true), config);
+        persistenceService = new PersistenceService(channel, new EnvironmentProperties(new int[]{100, 30}, true), config);
     }
 
     @AfterEach
@@ -117,12 +118,12 @@ class PersistenceServicePerformanceTest {
         SimulationConfiguration.PersistenceServiceConfig smallBatchConfig = new SimulationConfiguration.PersistenceServiceConfig();
         smallBatchConfig.jdbcUrl = smallBatchDb;
         smallBatchConfig.batchSize = 100;
-        PersistenceService smallBatchService = new PersistenceService(queue, new EnvironmentProperties(new int[]{100, 30}, true), smallBatchConfig);
+        PersistenceService smallBatchService = new PersistenceService(channel, new EnvironmentProperties(new int[]{100, 30}, true), smallBatchConfig);
         
         SimulationConfiguration.PersistenceServiceConfig largeBatchConfig = new SimulationConfiguration.PersistenceServiceConfig();
         largeBatchConfig.jdbcUrl = largeBatchDb;
         largeBatchConfig.batchSize = 5000;
-        PersistenceService largeBatchService = new PersistenceService(queue, new EnvironmentProperties(new int[]{100, 30}, true), largeBatchConfig);
+        PersistenceService largeBatchService = new PersistenceService(channel, new EnvironmentProperties(new int[]{100, 30}, true), largeBatchConfig);
         
         // Note: getBatchSize() is private, but we can verify constructor works
         assertNotNull(smallBatchService);
@@ -139,7 +140,7 @@ class PersistenceServicePerformanceTest {
      */
     private void waitForQueueToEmpty(int timeoutMillis) throws InterruptedException {
         long startTime = System.currentTimeMillis();
-        while (queue.size() > 0 && (System.currentTimeMillis() - startTime) < timeoutMillis) {
+        while (channel.size() > 0 && (System.currentTimeMillis() - startTime) < timeoutMillis) {
             Thread.sleep(50); // Check every 50ms
         }
     }
@@ -158,7 +159,7 @@ class PersistenceServicePerformanceTest {
         
         // Add multiple ticks to queue
         for (int i = 1; i <= 100; i++) {
-            queue.put(createTestTickState(i));
+            channel.send(createTestTickState(i));
         }
         
         // Wait for processing
@@ -166,7 +167,7 @@ class PersistenceServicePerformanceTest {
         
         // Verify service is running and queue is empty
         assertTrue(persistenceService.isRunning());
-        assertEquals(0, queue.size(), "Queue should be empty after processing");
+        assertEquals(0, channel.size(), "Queue should be empty after processing");
     }
 
     /**
@@ -184,13 +185,13 @@ class PersistenceServicePerformanceTest {
         
         // Add some data to trigger database creation
         for (int i = 1; i <= 50; i++) {
-            queue.put(createTestTickState(i));
+            channel.send(createTestTickState(i));
         }
         waitForQueueToEmpty(5000);
         
         // For in-memory database, just verify the service is running and queue is empty
         assertTrue(persistenceService.isRunning());
-        assertEquals(0, queue.size(), "Queue should be empty after processing");
+        assertEquals(0, channel.size(), "Queue should be empty after processing");
     }
 
     /**
@@ -209,14 +210,14 @@ class PersistenceServicePerformanceTest {
         
         // Fill queue to trigger throttling
         for (int i = 1; i <= 200; i++) {
-            queue.put(createTestTickState(i));
+            channel.send(createTestTickState(i));
         }
         
         // Wait for processing
         Thread.sleep(300);
         
         // Verify throttling occurred (queue should not be empty immediately)
-        assertTrue(queue.size() > 0, "Queue should not be empty immediately due to throttling");
+        assertTrue(channel.size() > 0, "Queue should not be empty immediately due to throttling");
         
         // Wait longer for processing to complete
         Thread.sleep(500);
@@ -239,7 +240,7 @@ class PersistenceServicePerformanceTest {
         
         // Add some data
         for (int i = 1; i <= 50; i++) {
-            queue.put(createTestTickState(i));
+            channel.send(createTestTickState(i));
         }
         
         // Wait for some processing
@@ -270,7 +271,7 @@ class PersistenceServicePerformanceTest {
         
         // Add test data
         for (int i = 1; i <= 100; i++) {
-            queue.put(createTestTickState(i));
+            channel.send(createTestTickState(i));
         }
         
         // Wait for processing
@@ -278,7 +279,7 @@ class PersistenceServicePerformanceTest {
         
         // Verify service is running and queue is empty
         assertTrue(persistenceService.isRunning());
-        assertEquals(0, queue.size(), "Queue should be empty after processing");
+        assertEquals(0, channel.size(), "Queue should be empty after processing");
     }
 
     /**
@@ -298,7 +299,7 @@ class PersistenceServicePerformanceTest {
         
         // Add large amount of data
         for (int i = 1; i <= 300; i++) {
-            queue.put(createTestTickState(i));
+            channel.send(createTestTickState(i));
         }
         
         // Wait for processing
@@ -313,7 +314,7 @@ class PersistenceServicePerformanceTest {
         if (persistenceService.isRunning()) {
             assertTrue(persistenceService.isRunning(), "Service should be running");
         }
-        assertEquals(0, queue.size(), "Queue should be empty after processing");
+        assertEquals(0, channel.size(), "Queue should be empty after processing");
     }
 
     /**
@@ -334,17 +335,17 @@ class PersistenceServicePerformanceTest {
         SimulationConfiguration.PersistenceServiceConfig smallBatchConfig = new SimulationConfiguration.PersistenceServiceConfig();
         smallBatchConfig.jdbcUrl = smallBatchDb;
         smallBatchConfig.batchSize = 100;
-        PersistenceService smallBatchService = new PersistenceService(queue, new EnvironmentProperties(new int[]{100, 30}, true), smallBatchConfig);
+        PersistenceService smallBatchService = new PersistenceService(channel, new EnvironmentProperties(new int[]{100, 30}, true), smallBatchConfig);
         
         SimulationConfiguration.PersistenceServiceConfig mediumBatchConfig = new SimulationConfiguration.PersistenceServiceConfig();
         mediumBatchConfig.jdbcUrl = mediumBatchDb;
         mediumBatchConfig.batchSize = 1000;
-        PersistenceService mediumBatchService = new PersistenceService(queue, new EnvironmentProperties(new int[]{100, 30}, true), mediumBatchConfig);
+        PersistenceService mediumBatchService = new PersistenceService(channel, new EnvironmentProperties(new int[]{100, 30}, true), mediumBatchConfig);
         
         SimulationConfiguration.PersistenceServiceConfig largeBatchConfig = new SimulationConfiguration.PersistenceServiceConfig();
         largeBatchConfig.jdbcUrl = largeBatchDb;
         largeBatchConfig.batchSize = 5000;
-        PersistenceService largeBatchService = new PersistenceService(queue, new EnvironmentProperties(new int[]{100, 30}, true), largeBatchConfig);
+        PersistenceService largeBatchService = new PersistenceService(channel, new EnvironmentProperties(new int[]{100, 30}, true), largeBatchConfig);
         
         // Start all services
         smallBatchService.start();
@@ -353,7 +354,7 @@ class PersistenceServicePerformanceTest {
         
         // Add test data
         for (int i = 1; i <= 100; i++) {
-            queue.put(createTestTickState(i));
+            channel.send(createTestTickState(i));
         }
         
         // Let them process
@@ -363,7 +364,7 @@ class PersistenceServicePerformanceTest {
         assertTrue(smallBatchService.isRunning());
         assertTrue(mediumBatchService.isRunning());
         assertTrue(largeBatchService.isRunning());
-        assertEquals(0, queue.size(), "Queue should be empty after processing");
+        assertEquals(0, channel.size(), "Queue should be empty after processing");
         
         // Cleanup
         smallBatchService.shutdown();

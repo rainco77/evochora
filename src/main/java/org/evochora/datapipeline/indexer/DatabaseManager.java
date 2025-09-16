@@ -63,7 +63,10 @@ public class DatabaseManager {
         
         // Apply performance optimizations using configurable values
         try (Statement st = conn.createStatement()) {
-            st.execute("PRAGMA journal_mode=WAL"); // Write-Ahead Logging for better concurrency
+            // WAL mode is unreliable for shared in-memory databases; disable it in that case.
+            if (!pathOrUrl.contains("mode=memory")) {
+                st.execute("PRAGMA journal_mode=WAL"); // Write-Ahead Logging for better concurrency
+            }
             st.execute("PRAGMA synchronous=NORMAL"); // Faster writes
             st.execute("PRAGMA cache_size=" + databaseConfig.cacheSize); // Configurable cache size
             st.execute("PRAGMA mmap_size=" + databaseConfig.mmapSize); // Configurable mmap size

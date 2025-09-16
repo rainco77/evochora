@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.evochora.compiler.api.ProgramArtifact;
 import org.evochora.compiler.internal.LinearizedProgramArtifact;
+import org.evochora.datapipeline.config.SimulationConfiguration;
 import org.evochora.runtime.model.EnvironmentProperties;
 import org.evochora.datapipeline.IControllable;
 import org.evochora.datapipeline.contracts.debug.PreparedTickState;
@@ -38,7 +39,7 @@ public class DebugIndexer implements IControllable, Runnable {
     private final AtomicInteger queueSize = new AtomicInteger(0);
     private final Thread queueProcessorThread;
     private final AtomicBoolean queueProcessorRunning = new AtomicBoolean(false);
-    
+
     // Helper class for parallel processing
     private static class TickData {
         final long tickNumber;
@@ -55,32 +56,30 @@ public class DebugIndexer implements IControllable, Runnable {
     private final AtomicBoolean paused = new AtomicBoolean(false);
     private final AtomicBoolean autoPaused = new AtomicBoolean(false);
     private final AtomicBoolean databaseHealthy = new AtomicBoolean(true);
-    
+
     // Multi-core processing
     private final ForkJoinPool processingPool;
     private final int threadCount;
-    
+
     // Memory optimizations - ThreadLocal collections to reduce allocations
     private final ThreadLocal<ArrayList<TickData>> tempTickDataList;
     private final ThreadLocal<ArrayList<CompletableFuture<Void>>> tempFuturesList;
     private long startTime = System.currentTimeMillis();
     private long nextTickToProcess = 0L; // Start at 0 to include tick 0
     private final ObjectMapper objectMapper = new ObjectMapper();
-    
-    // TPS calculation with active processing time tracking
-    // Simple TPS calculation - no complex timer tracking needed
-    
+
     // Track if raw_ticks table has ever existed to distinguish between startup and table disappearance
     private boolean rawTicksTableEverExisted = false;
-    private String rawDbPath;
-    private String debugDbPath;
+    private final String rawDbPath; // Can be a file path OR a JDBC URL
+    private final String debugDbPath;
+    private Connection rawDbConnection; // ADDED: Persistent connection to the raw database
 
     private final int batchSize; // Configurable batch size
-    private final org.evochora.datapipeline.config.SimulationConfiguration.IndexerServiceConfig config; // Consolidated configuration
+    private final SimulationConfiguration.IndexerServiceConfig config; // Consolidated configuration
     private EnvironmentProperties envProps; // Environment properties loaded from database
 
-    private Map<String, ProgramArtifact> artifacts = new HashMap<>();
-    
+    private final Map<String, ProgramArtifact> artifacts = new HashMap<>();
+
     // Helper classes
     private final ArtifactValidator artifactValidator = new ArtifactValidator();
     private final DatabaseManager databaseManager;
@@ -88,34 +87,28 @@ public class DebugIndexer implements IControllable, Runnable {
     private final InstructionBuilder instructionBuilder;
     private final InternalStateBuilder internalStateBuilder;
     private final TickProcessor tickProcessor;
-    private final org.evochora.datapipeline.config.SimulationConfiguration.CompressionConfig compressionConfig;
+    private final SimulationConfiguration.CompressionConfig compressionConfig;
 
-    /**
-     * Creates a new DebugIndexer with consolidated configuration.
-     * 
-     * @param rawDbUrl URL to the raw database
-     * @param debugDbUrl URL to the debug database
-     * @param config Consolidated indexer service configuration
-     */
-    public DebugIndexer(String rawDbUrl, String debugDbUrl, org.evochora.datapipeline.config.SimulationConfiguration.IndexerServiceConfig config) {
+    // Restore the original, simple constructor
+    public DebugIndexer(String rawDbUrl, String debugDbUrl, SimulationConfiguration.IndexerServiceConfig config) {
         this.rawDbPath = rawDbUrl;
         this.debugDbPath = debugDbUrl;
-        this.config = config != null ? config : new org.evochora.datapipeline.config.SimulationConfiguration.IndexerServiceConfig();
+        this.config = config != null ? config : new SimulationConfiguration.IndexerServiceConfig();
         this.batchSize = this.config.batchSize;
         this.compressionConfig = this.config.compression;
-        
+
         // Initialize multi-core processing
-        this.threadCount = this.config.parallelProcessing.enabled ? 
+        this.threadCount = this.config.parallelProcessing.enabled ?
             (this.config.parallelProcessing.threadCount > 0 ? this.config.parallelProcessing.threadCount : Runtime.getRuntime().availableProcessors()) : 1;
-        this.processingPool = this.config.parallelProcessing.enabled ? 
+        this.processingPool = this.config.parallelProcessing.enabled ?
             new ForkJoinPool(this.threadCount) : null;
-        
+
         // Initialize ThreadLocal collections if memory optimization is enabled
-        this.tempTickDataList = ThreadLocal.withInitial(() -> 
+        this.tempTickDataList = ThreadLocal.withInitial(() ->
             this.config.memoryOptimization.enabled ? new ArrayList<>(this.batchSize) : new ArrayList<>());
-        this.tempFuturesList = ThreadLocal.withInitial(() -> 
+        this.tempFuturesList = ThreadLocal.withInitial(() ->
             this.config.memoryOptimization.enabled ? new ArrayList<>(this.threadCount) : new ArrayList<>());
-        
+
         this.databaseManager = new DatabaseManager(debugDbUrl, this.batchSize, this.config.database);
         this.sourceViewBuilder = new SourceViewBuilder();
         this.instructionBuilder = new InstructionBuilder();
@@ -123,13 +116,13 @@ public class DebugIndexer implements IControllable, Runnable {
         this.tickProcessor = new TickProcessor(objectMapper, artifactValidator, sourceViewBuilder, instructionBuilder, internalStateBuilder, this.config.memoryOptimization);
         this.thread = new Thread(this, "DebugIndexer");
         this.thread.setDaemon(true);
-        
+
         // Initialize queue processor thread
         this.queueProcessorThread = new Thread(this::processQueuedData, "DebugIndexer-QueueProcessor");
         this.queueProcessorThread.setDaemon(true);
     }
 
-    
+
     @Override
     public void start() {
         if (running.compareAndSet(false, true)) {
@@ -142,7 +135,7 @@ public class DebugIndexer implements IControllable, Runnable {
                 log.warn("Failed to setup debug database: {} - starting with queuing enabled", e.getMessage(), e);
                 // Start with queuing enabled - no data loss
             }
-            
+
             // Start both threads
             thread.start();
             queueProcessorThread.start();
@@ -156,12 +149,12 @@ public class DebugIndexer implements IControllable, Runnable {
         // Manual pause always sets autoPaused to false
         // Auto-pause will set autoPaused to true before calling pause()
         autoPaused.set(false);
-        
+
         // Set the pause flag - the service will pause after finishing current batch
         paused.set(true);
         // Manual pause
         log.debug("Manual pause flag set, service will pause after finishing current batch and close database");
-        
+
         // For manual pause: immediately close database to ensure WAL is properly flushed
         // This prevents WAL files from remaining open
         if (Thread.currentThread().getName().equals("DebugIndexer")) {
@@ -179,7 +172,7 @@ public class DebugIndexer implements IControllable, Runnable {
         paused.set(false);
         autoPaused.set(false);
         // Don't start processing timer here - it will start when actual tick processing begins
-        
+
         // Reopen database connection if it was closed during manual pause
         try {
             if (!databaseManager.isConnectionAvailable()) {
@@ -203,7 +196,7 @@ public class DebugIndexer implements IControllable, Runnable {
             if (Thread.currentThread().getName().equals("DebugIndexer")) {
                 log.info("DebugIndexer: graceful termination tick:{} TPS:{}", currentTick, String.format("%.2f", tps));
             }
-            
+
             // Immediately perform database cleanup and WAL checkpointing to prevent WAL/SHM file leaks
             // This ensures cleanup happens even if called from external threads (like CLI exit)
             try {
@@ -213,21 +206,27 @@ public class DebugIndexer implements IControllable, Runnable {
                     log.debug("Executed final batch during shutdown");
                 }
                 databaseManager.closeQuietly();
+                
+                // Also close the raw database connection
+                if (rawDbConnection != null && !rawDbConnection.isClosed()) {
+                    rawDbConnection.close();
+                }
+                
                 log.debug("Database cleanup completed during shutdown");
             } catch (Exception e) {
                 log.warn("Error during shutdown database cleanup: {}", e.getMessage());
             }
-            
+
             thread.interrupt();
             queueProcessorThread.interrupt();
-            
+
             // Shutdown processing pool if it exists
             if (processingPool != null) {
                 processingPool.shutdown();
             }
         }
     }
-    
+
     /**
      * Force shutdown without waiting for graceful completion.
      * Still performs database cleanup to prevent WAL/SHM file leaks.
@@ -235,7 +234,7 @@ public class DebugIndexer implements IControllable, Runnable {
     public void forceShutdown() {
         if (running.get()) {
             running.set(false);
-            
+
             // Even for force shutdown, try to perform database cleanup to prevent WAL/SHM file leaks
             try {
                 log.debug("Performing database cleanup during force shutdown");
@@ -248,7 +247,7 @@ public class DebugIndexer implements IControllable, Runnable {
             } catch (Exception e) {
                 log.warn("Error during force shutdown database cleanup: {}", e.getMessage());
             }
-            
+
             thread.interrupt();
             queueProcessorThread.interrupt();
         }
@@ -263,12 +262,12 @@ public class DebugIndexer implements IControllable, Runnable {
     public boolean isPaused() {
         return paused.get();
     }
-    
+
     @Override
     public boolean isAutoPaused() {
         return autoPaused.get();
     }
-    
+
     /**
      * Check if the database is healthy and available for operations.
      * @return true if database operations can be performed
@@ -276,7 +275,7 @@ public class DebugIndexer implements IControllable, Runnable {
     public boolean isDatabaseHealthy() {
         return databaseHealthy.get();
     }
-    
+
     /**
      * Get the current health status of the debug indexer.
      * @return A string describing the current health status
@@ -293,7 +292,7 @@ public class DebugIndexer implements IControllable, Runnable {
         }
         return "RUNNING_HEALTHY";
     }
-    
+
     /**
      * Attempt to recover database health by reconnecting.
      * This method can be called externally to attempt recovery from degraded mode.
@@ -304,7 +303,7 @@ public class DebugIndexer implements IControllable, Runnable {
             log.info("Database is already healthy, no recovery needed");
             return true;
         }
-        
+
         try {
             log.info("Attempting database recovery...");
             databaseManager.setupDebugDatabase();
@@ -321,16 +320,16 @@ public class DebugIndexer implements IControllable, Runnable {
     private double calculateTPS() {
         long currentTime = System.currentTimeMillis();
         long currentTick = nextTickToProcess; // Use local counter instead of database query
-        
+
         if (currentTick <= 0 || startTime <= 0) {
             return 0.0;
         }
-        
+
         long totalTime = currentTime - startTime;
         if (totalTime <= 0) {
             return 0.0;
         }
-        
+
         // Simple calculation: ticks / time since start
         return (double) currentTick / (totalTime / 1000.0);
     }
@@ -339,21 +338,21 @@ public class DebugIndexer implements IControllable, Runnable {
         if (!running.get()) {
             return "stopped";
         }
-        
+
         try {
             long currentTick = getLastProcessedTick(); // Use last processed tick instead of next tick to process
             String rawDbInfo = rawDbPath != null ? rawDbPath.replace('/', '\\') : "unknown";
             String debugDbInfo = debugDbPath != null ? debugDbPath.replace('/', '\\') : "unknown";
             double tps = calculateTPS();
-            
+
             if (paused.get()) {
                 String status = autoPaused.get() ? "auto-paused" : "paused";
-                return String.format("%-12s %-8d %-8.2f %s", 
+                return String.format("%-12s %-8d %-8.2f %s",
                         status, currentTick, tps,
                         String.format("reading %s writing %s", rawDbInfo, debugDbInfo));
             }
-            
-            return String.format("%-12s %-8d %-8.2f %s", 
+
+            return String.format("%-12s %-8d %-8.2f %s",
                     "started", currentTick, tps,
                     String.format("reading %s writing %s", rawDbInfo, debugDbInfo));
         } catch (Exception e) {
@@ -379,7 +378,7 @@ public class DebugIndexer implements IControllable, Runnable {
                             Thread.currentThread().interrupt();
                             break;
                         }
-                        
+
                         // Check if there are new ticks to process (only if auto-paused)
                         if (hasNewTicksToProcess()) {
                             log.debug("New ticks detected, waking up from auto-pause");
@@ -402,7 +401,7 @@ public class DebugIndexer implements IControllable, Runnable {
                     }
                     continue;
                 }
-                
+
                 // Check if we need to reopen database after manual pause
                 if (!databaseManager.isConnectionAvailable()) {
                     log.debug("Reopening database connection after manual pause");
@@ -428,10 +427,10 @@ public class DebugIndexer implements IControllable, Runnable {
                             // New ticks arrived while we were processing - continue immediately
                             log.debug("New ticks available after processing batch, continuing immediately");
                             continue;
-                                                 } else {
+                        } else {
                              // No more ticks available - auto-pause to save resources
                              log.debug("No more ticks to process, auto-pausing indexer");
-                             
+
                              // For auto-pause: execute any remaining incomplete batches before pausing
                              // This ensures all data is committed and available to other threads
                              try {
@@ -439,20 +438,20 @@ public class DebugIndexer implements IControllable, Runnable {
                              } catch (Exception e) {
                                  log.warn("Error executing final batch before auto-pause: {}", e.getMessage());
                              }
-                             
+
                              // Enhanced auto-pause: ensure WAL is checkpointed and database is closed
                              // to prevent leaving WAL/SHM files behind
                              log.debug("Performing WAL checkpoint and closing database during auto-pause");
                              databaseManager.closeQuietly();
-                             
+
                              // Auto-pause - mark as auto-paused and set pause flag
                              // Auto-pausing
                              autoPaused.set(true);
                              paused.set(true);
-                             
+
                              // For auto-pause: database is now closed, will be reopened on resume
                              log.debug("Auto-pause: database closed, will reopen on resume");
-                             
+
                              // Wait a bit before checking for new ticks
                              try {
                                  Thread.sleep(200); // Check every 200ms
@@ -460,13 +459,13 @@ public class DebugIndexer implements IControllable, Runnable {
                                  Thread.currentThread().interrupt();
                                  break;
                              }
-                             
+
                              // Check if new ticks are available (only if not manually paused)
                              if (hasNewTicksToProcess() && !paused.get()) {
                                  log.debug("New ticks available, resuming debug indexer");
                                  autoPaused.set(false);
                                  paused.set(false);
-                                 
+
                                  // Reopen database connection since it was closed during auto-pause
                                  try {
                                      databaseManager.setupDebugDatabase();
@@ -478,7 +477,6 @@ public class DebugIndexer implements IControllable, Runnable {
                                  }
                                  continue;
                              }
-                             
                              continue;
                          }
                     } else {
@@ -491,7 +489,7 @@ public class DebugIndexer implements IControllable, Runnable {
                         } else {
                             // No more ticks available - auto-pause to save resources
                             log.debug("No more ticks to process, auto-pausing indexer");
-                            
+
                             // For auto-pause: execute any remaining incomplete batches before pausing
                             // This ensures all data is committed and available to other threads
                             try {
@@ -499,20 +497,20 @@ public class DebugIndexer implements IControllable, Runnable {
                             } catch (Exception e) {
                                 log.warn("Error executing final batch before auto-pause: {}", e.getMessage());
                             }
-                            
+
                             // Enhanced auto-pause: ensure WAL is checkpointed and database is closed
                             // to prevent leaving WAL/SHM files behind
                             log.debug("Performing WAL checkpoint and closing database during auto-pause");
                             databaseManager.closeQuietly();
-                            
+
                             // Auto-pause - mark as auto-paused and set pause flag
                             // Auto-pausing
                             autoPaused.set(true);
                             paused.set(true);
-                            
+
                             // For auto-pause: database is now closed, will be reopened on resume
                             log.debug("Auto-pause: database closed, will reopen on resume");
-                            
+
                             // Wait a bit before checking for new ticks
                             try {
                                 Thread.sleep(200); // Check every 200ms
@@ -520,13 +518,12 @@ public class DebugIndexer implements IControllable, Runnable {
                                 Thread.currentThread().interrupt();
                                 break;
                             }
-                            
                             // Check if new ticks are available (only if not manually paused)
                             if (hasNewTicksToProcess() && !paused.get()) {
                                 log.debug("New ticks available, resuming debug indexer");
                                 autoPaused.set(false);
                                 paused.set(false);
-                                
+
                                 // Reopen database connection since it was closed during auto-pause
                                 try {
                                     databaseManager.setupDebugDatabase();
@@ -538,7 +535,6 @@ public class DebugIndexer implements IControllable, Runnable {
                                 }
                                 continue;
                             }
-                            
                             continue;
                         }
                     }
@@ -546,17 +542,6 @@ public class DebugIndexer implements IControllable, Runnable {
                     if (running.get()) { // Only warn if still running
                         log.warn("Failed to process tick {}: {}", nextTickToProcess, e.getMessage());
                     }
-                }
-                
-                // Manual pause is now handled immediately in the pause() method
-                // and in the main pause loop above
-            }
-            
-            // Log health status periodically
-            if (running.get() && !paused.get()) {
-                String healthStatus = getHealthStatus();
-                if (healthStatus.equals("RUNNING_DEGRADED")) {
-                    log.warn("DebugIndexer health status: {} - continuing in degraded mode", healthStatus);
                 }
             }
         } catch (Exception e) {
@@ -568,7 +553,7 @@ public class DebugIndexer implements IControllable, Runnable {
                 double tps = calculateTPS();
                 log.info("DebugIndexer: graceful termination tick:{} TPS:{}", currentTick, String.format("%.2f", tps));
             }
-            
+
             // Cleanup database resources
             try {
                 if (databaseManager.getBatchCount() > 0) {
@@ -578,6 +563,11 @@ public class DebugIndexer implements IControllable, Runnable {
                 databaseManager.closeQuietly();
             } catch (Exception ignored) {}
         }
+    }
+
+    @Override
+    public void flush() {
+        // No-op for DebugIndexer, as it reads data transactionally and flush is controlled by the source DB.
     }
 
     /**
@@ -613,12 +603,12 @@ public class DebugIndexer implements IControllable, Runnable {
                             }
                         }
                     }
-                    
+
                     if (processedCount > 0) {
                         log.info("Processed {} queued ticks, {} remaining in queue", processedCount, queueSize.get());
                     }
                 }
-                
+
                 // Sleep before next cycle
                 Thread.sleep(200);
             } catch (InterruptedException e) {
@@ -641,18 +631,22 @@ public class DebugIndexer implements IControllable, Runnable {
      * Used to wake up from pause mode when new ticks arrive.
      */
     private boolean hasNewTicksToProcess() {
-        try (Connection rawConn = databaseManager.createOptimizedConnection(rawDbPath);
-             PreparedStatement countPs = rawConn.prepareStatement(
+        try {
+            if (rawDbConnection == null || rawDbConnection.isClosed()) {
+                rawDbConnection = databaseManager.createOptimizedConnection(rawDbPath);
+            }
+            try (PreparedStatement countPs = rawDbConnection.prepareStatement(
                      "SELECT COUNT(*) FROM raw_ticks WHERE tick_number >= ?")) {
-            countPs.setLong(1, nextTickToProcess);
-            try (ResultSet countRs = countPs.executeQuery()) {
-                if (countRs.next()) {
-                    // Mark that the table exists and is accessible
-                    rawTicksTableEverExisted = true;
-                    return countRs.getLong(1) > 0;
+                countPs.setLong(1, nextTickToProcess);
+                try (ResultSet countRs = countPs.executeQuery()) {
+                    if (countRs.next()) {
+                        // Mark that the table exists and is accessible
+                        rawTicksTableEverExisted = true;
+                        return countRs.getLong(1) > 0;
+                    }
                 }
             }
-                 } catch (Exception e) {
+        } catch (Exception e) {
             if (rawTicksTableEverExisted) {
                 // Table was there before but now missing - this is an error!
                 log.warn("raw_ticks table disappeared after being available in hasNewTicksToProcess: {}", e.getMessage());
@@ -670,70 +664,73 @@ public class DebugIndexer implements IControllable, Runnable {
     private void loadInitialData() {
         // Wait for raw database to be available
         while (running.get()) {
-            try (Connection rawConn = databaseManager.createOptimizedConnection(rawDbPath);
-                 Statement st = rawConn.createStatement()) {
-                
-                // First: Wait for raw_ticks table to exist and contain at least one tick
-                // This ensures all program artifacts have been written by the persistence service
-                try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM raw_ticks")) {
-                    if (!rs.next() || rs.getLong(1) == 0) {
-                        // No ticks available yet, wait and retry
-                        log.debug("Waiting for first tick to be available in raw database...");
-                        try {
-                            Thread.sleep(200);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            break;
-                        }
-                        continue;
-                    }
+            try {
+                if (rawDbConnection == null || rawDbConnection.isClosed()) {
+                    rawDbConnection = databaseManager.createOptimizedConnection(rawDbPath);
                 }
-                
-                // Second: Load program artifacts (now safe to do so)
-                try (ResultSet rs = st.executeQuery("SELECT program_id, artifact_json FROM program_artifacts")) {
-                    while (rs.next()) {
-                        String id = rs.getString(1);
-                        String json = rs.getString(2);
-                        
-                        // Deserialize to LinearizedProgramArtifact
-                        LinearizedProgramArtifact linearized = objectMapper.readValue(json, LinearizedProgramArtifact.class);
-                        
-                        // Convert back to ProgramArtifact
-                        ProgramArtifact artifact = linearized.toProgramArtifact();
-                        this.artifacts.put(id, artifact);
-                    }
-                }
-                
-                // Third: Load world shape from database
-                try (ResultSet rs = st.executeQuery("SELECT key, value FROM simulation_metadata WHERE key = 'worldShape'")) {
-                    if (rs.next()) {
-                        int[] dbWorldShape = objectMapper.readValue(rs.getString(2), int[].class);
-                        // Also load isToroidal if available, otherwise assume true for backward compatibility
-                        boolean isToroidal = true;
-                        try (ResultSet toroidalRs = st.executeQuery("SELECT key, value FROM simulation_metadata WHERE key = 'isToroidal'")) {
-                            if (toroidalRs.next()) {
-                                isToroidal = objectMapper.readValue(toroidalRs.getString(2), Boolean.class);
+                try (Statement st = rawDbConnection.createStatement()) {
+
+                    // First: Wait for raw_ticks table to exist and contain at least one tick
+                    // This ensures all program artifacts have been written by the persistence service
+                    try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM raw_ticks")) {
+                        if (!rs.next() || rs.getLong(1) == 0) {
+                            // No ticks available yet, wait and retry
+                            log.debug("Waiting for first tick to be available in raw database...");
+                            try {
+                                Thread.sleep(200);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                break;
                             }
+                            continue;
                         }
-                        this.envProps = new EnvironmentProperties(dbWorldShape, isToroidal);
                     }
-                }
-                
-                // Fourth: Write all program artifacts to debug database
+
+                    // Second: Load program artifacts (now safe to do so)
+                    try (ResultSet rs = st.executeQuery("SELECT program_id, artifact_json FROM program_artifacts")) {
+                        while (rs.next()) {
+                            String id = rs.getString(1);
+                            String json = rs.getString(2);
+
+                            // Deserialize to LinearizedProgramArtifact
+                            LinearizedProgramArtifact linearized = objectMapper.readValue(json, LinearizedProgramArtifact.class);
+
+                            // Convert back to ProgramArtifact
+                            ProgramArtifact artifact = linearized.toProgramArtifact();
+                            this.artifacts.put(id, artifact);
+                        }
+                    }
+
+                    // Third: Load world shape from database
+                    try (ResultSet rs = st.executeQuery("SELECT key, value FROM simulation_metadata WHERE key = 'worldShape'")) {
+                        if (rs.next()) {
+                            int[] dbWorldShape = objectMapper.readValue(rs.getString(2), int[].class);
+                            // Also load isToroidal if available, otherwise assume true for backward compatibility
+                            boolean isToroidal = true;
+                            try (ResultSet toroidalRs = st.executeQuery("SELECT key, value FROM simulation_metadata WHERE key = 'isToroidal'")) {
+                                if (toroidalRs.next()) {
+                                    isToroidal = objectMapper.readValue(toroidalRs.getString(2), Boolean.class);
+                                }
+                            }
+                            this.envProps = new EnvironmentProperties(dbWorldShape, isToroidal);
+                        }
+                    }
+
+                    // Fourth: Write all program artifacts to debug database
                     writeProgramArtifacts();
-                if (databaseHealthy.get()) {
-                    log.debug("Successfully wrote {} program artifacts to debug database", this.artifacts.size());
-                }
-                
-                // Fifth: Copy simulation metadata to debug database
+                    if (databaseHealthy.get()) {
+                        log.debug("Successfully wrote {} program artifacts to debug database", this.artifacts.size());
+                    }
+
+                    // Fifth: Copy simulation metadata to debug database
                     writeSimulationMetadata();
-                if (databaseHealthy.get()) {
-                    log.debug("Successfully wrote simulation metadata to debug database");
+                    if (databaseHealthy.get()) {
+                        log.debug("Successfully wrote simulation metadata to debug database");
+                    }
+
+                    log.debug("Successfully loaded initial data from raw database");
+                    break; // Successfully loaded, exit the loop
                 }
-                
-                log.debug("Successfully loaded initial data from raw database");
-                break; // Successfully loaded, exit the loop
-                
             } catch (Exception e) {
                 if (running.get()) {
                     log.info("Waiting for raw database to be available: {}", e.getMessage());
@@ -749,31 +746,31 @@ public class DebugIndexer implements IControllable, Runnable {
             }
         }
     }
-    
+
     /**
      * Writes simulation metadata to the debug database.
      * This method ensures that all simulation-specific metadata (like world shape, toroidal status, etc.)
      * are available in the debug database for the web debugger to access.
-     * 
+     *
      * <p>Database failures are logged as errors but do not stop the process.
      */
     private void writeSimulationMetadata() {
         try (Connection conn = databaseManager.createOptimizedConnection(debugDbPath);
              PreparedStatement ps = conn.prepareStatement(
                 "INSERT OR REPLACE INTO simulation_metadata(key, value) VALUES (?, ?)")) {
-            
+
             // World shape
             byte[] worldShapeBytes = objectMapper.writeValueAsBytes(envProps.getWorldShape());
             ps.setString(1, "worldShape");
             ps.setBytes(2, worldShapeBytes);
             ps.addBatch();
-            
+
             // Toroidal status
             byte[] isToroidalBytes = objectMapper.writeValueAsBytes(envProps.isToroidal());
             ps.setString(1, "isToroidal");
             ps.setBytes(2, isToroidalBytes);
             ps.addBatch();
-            
+
             // Execute batch
             int[] results = ps.executeBatch();
             log.debug("Executed {} batch operations for simulation metadata", results.length);
@@ -789,14 +786,14 @@ public class DebugIndexer implements IControllable, Runnable {
      * Writes all loaded program artifacts to the debug database.
      * This method is called once after loading initial data and ensures that all program artifacts
      * are available in the debug database for the web debugger to access.
-     * 
+     *
      * <p>Program artifacts are written as JSON strings using the program ID as the primary key.
      * If an artifact with the same ID already exists, it will be replaced (INSERT OR REPLACE).
-     * 
+     *
      * <p>Individual artifact write failures are logged as warnings but do not stop the process.
      * If no artifacts are available, this method returns silently as this is normal for
      * simulations without compiled programs.
-     * 
+     *
      * <p>Database failures are logged as errors but do not stop the process.
      */
     private void writeProgramArtifacts() {
@@ -804,11 +801,11 @@ public class DebugIndexer implements IControllable, Runnable {
             log.debug("No program artifacts to write - this is normal for simulations without compiled programs");
             return;
         }
-        
+
         try (Connection conn = databaseManager.createOptimizedConnection(debugDbPath);
              PreparedStatement ps = conn.prepareStatement(
                 "INSERT OR REPLACE INTO program_artifacts(program_id, artifact_json) VALUES (?, ?)")) {
-            
+
             for (Map.Entry<String, ProgramArtifact> entry : this.artifacts.entrySet()) {
                 try {
                     byte[] jsonBytes = objectMapper.writeValueAsBytes(entry.getValue());
@@ -834,11 +831,14 @@ public class DebugIndexer implements IControllable, Runnable {
      * @return Number of ticks still remaining to be processed, or -1 for error
      */
     private int processNextBatch() {
-        try (Connection rawConn = databaseManager.createOptimizedConnection(rawDbPath)) {
-            
+        try {
+            if (rawDbConnection == null || rawDbConnection.isClosed()) {
+                rawDbConnection = databaseManager.createOptimizedConnection(rawDbPath);
+            }
+
             // Count available ticks starting from the next one to process
             long totalAvailableTicks = 0;
-            try (PreparedStatement countPs = rawConn.prepareStatement(
+            try (PreparedStatement countPs = rawDbConnection.prepareStatement(
                     "SELECT COUNT(*) FROM raw_ticks WHERE tick_number >= ?")) {
                 countPs.setLong(1, nextTickToProcess);
                 try (ResultSet countRs = countPs.executeQuery()) {
@@ -858,40 +858,39 @@ public class DebugIndexer implements IControllable, Runnable {
                     return -1;
                 }
             }
-            
+
             // If we have no ticks remaining, return 0
             if (totalAvailableTicks == 0) {
                 return 0;
             }
-            
+
             // Process up to batch size ticks, but process fewer if that's all that's available
             // This ensures we don't wait for a full batch - we process whatever is available
             int actualBatchSize = Math.min((int)totalAvailableTicks, batchSize);
-            
-            log.debug("Processing {} ticks (available: {}, batch limit: {})", 
+
+            log.debug("Processing {} ticks (available: {}, batch limit: {})",
                      actualBatchSize, totalAvailableTicks, batchSize);
-            
+
             // Log health status if database is in degraded mode
             if (!databaseHealthy.get()) {
                 log.warn("Processing ticks in degraded mode - database operations are disabled");
             }
-            
+
             // Start processing batch
-            
-            try (PreparedStatement ps = rawConn.prepareStatement(
+            try (PreparedStatement ps = rawDbConnection.prepareStatement(
                     "SELECT tick_number, tick_data_json FROM raw_ticks WHERE tick_number >= ? ORDER BY tick_number LIMIT ?")) {
                 ps.setLong(1, nextTickToProcess);
                 ps.setInt(2, actualBatchSize);
-                
+
                 try (ResultSet rs = ps.executeQuery()) {
                     // Use ThreadLocal collections for memory optimization
-                    List<CompletableFuture<Void>> futures = this.config.memoryOptimization.enabled ? 
+                    List<CompletableFuture<Void>> futures = this.config.memoryOptimization.enabled ?
                         tempFuturesList.get() : new ArrayList<>();
                     boolean processedAny = false;
                     int processedCount = 0;
-                    
+
                     // Clear and reuse ThreadLocal list
-                    List<TickData> tickDataList = this.config.memoryOptimization.enabled ? 
+                    List<TickData> tickDataList = this.config.memoryOptimization.enabled ?
                         tempTickDataList.get() : new ArrayList<>();
                     if (this.config.memoryOptimization.enabled) {
                         tickDataList.clear();
@@ -901,7 +900,7 @@ public class DebugIndexer implements IControllable, Runnable {
                         String rawTickJson = rs.getString(2);
                         tickDataList.add(new TickData(tickNumber, rawTickJson));
                     }
-                    
+
                     // Process ticks in parallel if multi-core processing is enabled
                     if (processingPool != null && tickDataList.size() > 1) {
                         // Split into chunks for parallel processing
@@ -909,7 +908,7 @@ public class DebugIndexer implements IControllable, Runnable {
                         for (int i = 0; i < tickDataList.size(); i += chunkSize) {
                             int endIndex = Math.min(i + chunkSize, tickDataList.size());
                             List<TickData> chunk = tickDataList.subList(i, endIndex);
-                            
+
                             CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                                 for (TickData tickData : chunk) {
                                     try {
@@ -925,12 +924,12 @@ public class DebugIndexer implements IControllable, Runnable {
                             }, processingPool);
                             futures.add(future);
                         }
-                        
+
                         // Wait for all parallel processing to complete
                         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
                         processedCount = tickDataList.size();
                         processedAny = processedCount > 0;
-                        
+
                         // Update next tick to process
                         if (processedAny && !tickDataList.isEmpty()) {
                             long maxTickNumber = tickDataList.stream().mapToLong(td -> td.tickNumber).max().orElse(nextTickToProcess - 1);
@@ -943,7 +942,7 @@ public class DebugIndexer implements IControllable, Runnable {
                                 RawTickState rawTickState = objectMapper.readValue(tickData.rawTickJson, new TypeReference<>() {});
                                 PreparedTickState preparedTick = tickProcessor.transformRawToPrepared(rawTickState, artifacts, envProps);
                                 writePreparedTick(preparedTick);
-                                
+
                                 // Update next tick to process
                                 if (tickData.tickNumber >= nextTickToProcess) {
                                     nextTickToProcess = tickData.tickNumber + 1;
@@ -957,14 +956,14 @@ public class DebugIndexer implements IControllable, Runnable {
                             }
                         }
                     }
-                    
+
                     if (processedAny) {
                         log.debug("Processed {} ticks in batch, next tick to process: {}", processedCount, nextTickToProcess);
                     }
-                    
+
                     // Calculate remaining ticks after processing
                     long remainingAfterProcessing = totalAvailableTicks - processedCount;
-                    
+
                     // Return the number of ticks that are still remaining to be processed
                     return (int)remainingAfterProcessing;
                 }
@@ -980,7 +979,7 @@ public class DebugIndexer implements IControllable, Runnable {
     /**
      * Builds a complete source view for an organism, including source lines and annotations.
      * This method delegates to the SourceViewBuilder helper class.
-     * 
+     *
      * @param organism The organism to build the source view for
      * @param artifact The program artifact containing source information
      * @param validity The validity status of the artifact
@@ -1003,13 +1002,13 @@ public class DebugIndexer implements IControllable, Runnable {
                 running.set(false);
                 return;
             }
-            
+
             dataQueue.offer(preparedTick);
             queueSize.incrementAndGet();
             log.warn("Database unavailable - queued tick {} (queue size: {})", preparedTick.tickNumber(), queueSize.get());
             return;
         }
-        
+
         try {
             byte[] jsonBytes = objectMapper.writeValueAsBytes(preparedTick);
             if (compressionConfig != null && compressionConfig.enabled) {
@@ -1023,43 +1022,43 @@ public class DebugIndexer implements IControllable, Runnable {
             log.error("Failed to write prepared tick {} to database: {} - marking database as unhealthy, future writes will be skipped", preparedTick.tickNumber(), e.getMessage(), e);
             // Mark database as unhealthy and continue processing
             databaseHealthy.set(false);
-            
+
             // Try to queue this tick as well
             if (queueSize.get() < MAX_QUEUE_SIZE) {
                 dataQueue.offer(preparedTick);
                 queueSize.incrementAndGet();
                 log.warn("Queued tick {} after database failure (queue size: {})", preparedTick.tickNumber(), queueSize.get());
-        } else {
+            } else {
                 log.error("Queue is full - cannot queue tick {}, stopping processing to prevent data loss", preparedTick.tickNumber());
                 running.set(false);
             }
         }
     }
 
-    public long getLastProcessedTick() { 
-        return nextTickToProcess > 0 ? nextTickToProcess - 1 : 0; 
+    public long getLastProcessedTick() {
+        return nextTickToProcess > 0 ? nextTickToProcess - 1 : 0;
     }
-    
+
     /**
      * Returns a copy of all program artifacts processed by this indexer.
      * This method works even when the database connection is closed (uses internal state).
-     * 
+     *
      * @return A map of program ID to ProgramArtifact, or empty map if none available
      */
     public Map<String, ProgramArtifact> getProgramArtifacts() {
         return new HashMap<>(artifacts); // Return defensive copy
     }
-    
+
     /**
      * Returns the environment properties (world shape, toroidal status) loaded by this indexer.
      * This method works even when the database connection is closed (uses internal state).
-     * 
+     *
      * @return EnvironmentProperties, or null if not yet loaded
      */
     public EnvironmentProperties getEnvironmentProperties() {
         return envProps; // Return reference (EnvironmentProperties is immutable)
     }
-    
+
     public String getRawDbPath() { return rawDbPath; }
     public String getDebugDbPath() { return debugDbPath; }
     public int getBatchCount() { return databaseManager.getBatchCount(); }
@@ -1072,7 +1071,7 @@ public class DebugIndexer implements IControllable, Runnable {
     public int getQueueSize() {
         return queueSize.get();
     }
-    
+
     /**
      * Get maximum queue capacity.
      * @return Maximum number of ticks that can be queued

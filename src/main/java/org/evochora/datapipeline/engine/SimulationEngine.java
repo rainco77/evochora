@@ -8,11 +8,12 @@ import org.evochora.runtime.model.Organism;
 import org.evochora.runtime.worldgen.IEnergyDistributionCreator;
 import org.evochora.runtime.worldgen.EnergyStrategyFactory;
 import org.evochora.datapipeline.IControllable;
+import org.evochora.datapipeline.channel.IOutputChannel;
+import org.evochora.datapipeline.contracts.IQueueMessage;
 import org.evochora.datapipeline.contracts.ProgramArtifactMessage;
 import org.evochora.datapipeline.contracts.raw.RawCellState;
 import org.evochora.datapipeline.contracts.raw.RawOrganismState;
 import org.evochora.datapipeline.contracts.raw.RawTickState;
-import org.evochora.datapipeline.queue.ITickMessageQueue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,19 +33,17 @@ public class SimulationEngine implements IControllable, Runnable {
         void onCheckpointPause(int pausedAtTick, int[] remainingTicks);
     }
 
-    private final ITickMessageQueue queue;
+    private final IOutputChannel<IQueueMessage> outputChannel;
     private final Thread thread;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean paused = new AtomicBoolean(false);
     private final AtomicBoolean autoPaused = new AtomicBoolean(false);
     private final AtomicBoolean manuallyPaused = new AtomicBoolean(false);
     private final org.evochora.runtime.model.EnvironmentProperties environmentProperties;
-    private final Logger logger;
     private Simulation simulation;
     private List<OrganismPlacement> organismPlacements;
     private List<IEnergyDistributionCreator> energyStrategies;
     private IRandomProvider randomProvider;
-    private Long seed = null;
     private long startTime = 0;
     private int[] checkpointPauseTicks = null; // Configuration for checkpoint-pause ticks
     private int nextCheckpointPauseIndex = 0; // Index of next checkpoint-pause tick to check
@@ -60,25 +59,24 @@ public class SimulationEngine implements IControllable, Runnable {
     /**
      * Creates a new SimulationEngine with the specified configuration.
      * 
-     * @param queue The message queue for communication with other services
+     * @param outputChannel The output channel for communication with other services
      * @param environmentProperties The environment configuration (world shape, toroidal setting)
      * @param organismPlacements The list of organisms to place in the simulation
      * @param energyStrategies The energy distribution strategies
      * @param skipProgramArtefact Whether to skip ProgramArtifact features (default: false)
      */
-    public SimulationEngine(ITickMessageQueue queue, 
+    public SimulationEngine(IOutputChannel<IQueueMessage> outputChannel, 
                            org.evochora.runtime.model.EnvironmentProperties environmentProperties,
                            List<OrganismPlacement> organismPlacements, 
                            List<IEnergyDistributionCreator> energyStrategies, 
                            boolean skipProgramArtefact) {
-        this.queue = queue;
+        this.outputChannel = outputChannel;
         this.environmentProperties = environmentProperties;
         this.organismPlacements = organismPlacements != null ? new java.util.ArrayList<>(organismPlacements) : new java.util.ArrayList<>();
         this.energyStrategies = energyStrategies != null ? new java.util.ArrayList<>(energyStrategies) : new java.util.ArrayList<>();
         this.randomProvider = null;
         this.thread = new Thread(this, "SimulationEngine");
         this.thread.setDaemon(true);
-        this.logger = LoggerFactory.getLogger(SimulationEngine.class);
         
         // Setze ProgramArtifact-Konfiguration direkt
         this.enableProgramArtifactFeatures = !skipProgramArtefact;
@@ -87,18 +85,18 @@ public class SimulationEngine implements IControllable, Runnable {
     /**
      * Creates a new SimulationEngine with ProgramArtifact features enabled by default.
      */
-    public SimulationEngine(ITickMessageQueue queue, 
+    public SimulationEngine(IOutputChannel<IQueueMessage> outputChannel, 
                            org.evochora.runtime.model.EnvironmentProperties environmentProperties,
                            List<OrganismPlacement> organismPlacements, 
                            List<IEnergyDistributionCreator> energyStrategies) {
-        this(queue, environmentProperties, organismPlacements, energyStrategies, false);
+        this(outputChannel, environmentProperties, organismPlacements, energyStrategies, false);
     }
     
     /**
      * Simple constructor for tests with default environment.
      */
-    public SimulationEngine(ITickMessageQueue queue) {
-        this(queue, new org.evochora.runtime.model.EnvironmentProperties(new int[]{120, 80}, true), 
+    public SimulationEngine(IOutputChannel<IQueueMessage> outputChannel) {
+        this(outputChannel, new org.evochora.runtime.model.EnvironmentProperties(new int[]{120, 80}, true), 
              new java.util.ArrayList<>(), new java.util.ArrayList<>());
     }
     
@@ -131,7 +129,6 @@ public class SimulationEngine implements IControllable, Runnable {
 
 
     public void setSeed(java.lang.Long seed) {
-        this.seed = seed;
         if (seed == null) {
             this.randomProvider = null;
         } else {
@@ -188,8 +185,6 @@ public class SimulationEngine implements IControllable, Runnable {
             simulation = new Simulation(env);
             simulation.setRandomProvider(randomProvider);
             
-            String seedInfo = seed != null ? String.valueOf(seed) : "default";
-            
             thread.start();
         }
     }
@@ -236,6 +231,11 @@ public class SimulationEngine implements IControllable, Runnable {
     
     @Override
     public boolean isAutoPaused() { return autoPaused.get(); }
+
+    @Override
+    public void flush() {
+        // No-op for SimulationEngine, as it writes directly to the output channel and has no internal buffers to flush.
+    }
 
     private double calculateTPS() {
         long currentTime = System.currentTimeMillis();
@@ -307,12 +307,10 @@ public class SimulationEngine implements IControllable, Runnable {
         
         long currentTick = simulation.getCurrentTick();
         int[] counts = getOrganismCounts();
-        int queueSize = queue.size();
-        boolean isRunning = running.get();
-        boolean isPaused = paused.get();
         double tps = calculateTPS();
         
-        if (isPaused) {
+        String status = running.get() ? "started" : "stopped";
+        if (paused.get()) {
             String pauseType;
             if (manuallyPaused.get()) {
                 pauseType = "paused";
@@ -321,33 +319,13 @@ public class SimulationEngine implements IControllable, Runnable {
             } else {
                 pauseType = "paused";
             }
-            if (queue instanceof org.evochora.datapipeline.queue.InMemoryTickQueue) {
-                org.evochora.datapipeline.queue.InMemoryTickQueue memQueue = (org.evochora.datapipeline.queue.InMemoryTickQueue) queue;
-                int currentMessages = memQueue.getCurrentMessageCount();
-                int maxMessages = memQueue.getMaxMessageCount();
-                String queueStatus = String.format("queue:%d/%d elements", currentMessages, maxMessages);
-                return String.format("%-12s %-8d %-8.2f %s",
-                        pauseType, currentTick, tps,
-                        String.format("organisms:[%d,%d] %s", counts[0], counts[1], queueStatus));
-            } else {
-                return String.format("%-12s %-8d %-8.2f %s",
-                        pauseType, currentTick, tps,
-                        String.format("organisms:[%d,%d] queue:%d elements", counts[0], counts[1], queueSize));
-            }
+            return String.format("%-12s %-8d %-8.2f %s",
+                    pauseType, currentTick, tps,
+                    String.format("organisms:[%d,%d]", counts[0], counts[1]));
         }
         
-        if (queue instanceof org.evochora.datapipeline.queue.InMemoryTickQueue) {
-            org.evochora.datapipeline.queue.InMemoryTickQueue memQueue = (org.evochora.datapipeline.queue.InMemoryTickQueue) queue;
-            int currentMessages = memQueue.getCurrentMessageCount();
-            int maxMessages = memQueue.getMaxMessageCount();
-            return String.format("%-12s %-8d %-8.2f %s",
-                    isRunning ? "started" : "stopped", currentTick, tps,
-                    String.format("organisms:[%d,%d] queue:%d/%d elements", counts[0], counts[1], currentMessages, maxMessages));
-        } else {
-            return String.format("%-12s %-8d %-8.2f %s",
-                    isRunning ? "started" : "stopped", currentTick, tps,
-                    String.format("organisms:[%d,%d] queue:%d elements", counts[0], counts[1], queueSize));
-        }
+        return String.format("%-12s %-8d %-8.2f",
+                status, currentTick, tps);
     }
 
     @Override
@@ -452,7 +430,7 @@ public class SimulationEngine implements IControllable, Runnable {
                     for (Map.Entry<String, ProgramArtifact> entry : artifactsById.entrySet()) {
                         try {
                             ProgramArtifactMessage artifactMsg = new ProgramArtifactMessage(entry.getKey(), entry.getValue());
-                            queue.put(artifactMsg);
+                            outputChannel.send(artifactMsg);
                             log.debug("Sent ProgramArtifact {} to persistence queue", entry.getKey());
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
@@ -468,7 +446,7 @@ public class SimulationEngine implements IControllable, Runnable {
             // Send initial tick state (tick 0) before starting the simulation loop
             try {
                 RawTickState initialTickMsg = toRawState(simulation);
-                queue.put(initialTickMsg);
+                outputChannel.send(initialTickMsg);
                 log.debug("Sent initial tick state (tick 0) to queue");
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -478,20 +456,9 @@ public class SimulationEngine implements IControllable, Runnable {
             // Start simulation loop
             while (running.get()) {
                 if (paused.get()) {
-                    // Auto-resume if queue has space and we're in auto-pause (but not manually paused)
-                    if (autoPaused.get() && !manuallyPaused.get() && queue instanceof org.evochora.datapipeline.queue.InMemoryTickQueue) {
-                        org.evochora.datapipeline.queue.InMemoryTickQueue memQueue = (org.evochora.datapipeline.queue.InMemoryTickQueue) queue;
-                        if (memQueue.canAcceptMessage()) {
-                            log.debug("Auto-resuming simulation - queue has space");
-                            autoPaused.set(false);
-                            paused.set(false);
-                            continue;
-                        }
-                    }
-                    
-                    // Use polling with 100ms sleep for auto-pause
+                    // REMOVED: All auto-resume logic based on canAcceptMessage()
                     try {
-                        Thread.sleep(100); // 100ms polling as requested
+                        Thread.sleep(100); 
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                         break;
@@ -507,20 +474,7 @@ public class SimulationEngine implements IControllable, Runnable {
                         continue;
                     }
                     
-                    // Check if queue can accept the next tick BEFORE processing it (only if not manually paused)
-                    if (!manuallyPaused.get() && queue instanceof org.evochora.datapipeline.queue.InMemoryTickQueue) {
-                        org.evochora.datapipeline.queue.InMemoryTickQueue memQueue = (org.evochora.datapipeline.queue.InMemoryTickQueue) queue;
-                        if (!memQueue.canAcceptMessage()) {
-                            log.debug("Auto-pausing simulation - queue is full");
-                            autoPaused.set(true);
-                            paused.set(true);
-                            continue;
-                        }
-                    } else if (!manuallyPaused.get()) {
-                        // Only InMemoryTickQueue is supported for auto-pause functionality
-                        throw new UnsupportedOperationException("Auto-pause is only supported with InMemoryTickQueue, got: " + queue.getClass().getSimpleName());
-                    }
-
+                    // REMOVED: All pre-emptive checks using canAcceptMessage()
                     simulation.tick();
                     
                     // Check if we've reached the maximum tick limit BEFORE writing the tick
@@ -545,17 +499,7 @@ public class SimulationEngine implements IControllable, Runnable {
                     RawTickState tickMsg = toRawState(simulation);
                     
                     // Try to put message - if it fails, go to auto-pause
-                    if (queue instanceof org.evochora.datapipeline.queue.InMemoryTickQueue) {
-                        org.evochora.datapipeline.queue.InMemoryTickQueue memQueue = (org.evochora.datapipeline.queue.InMemoryTickQueue) queue;
-                        if (!memQueue.tryPut(tickMsg)) {
-                            log.debug("Auto-pausing simulation - queue is full");
-                            autoPaused.set(true);
-                            paused.set(true);
-                            continue;
-                        }
-                    } else {
-                        queue.put(tickMsg);
-                    }
+                    outputChannel.send(tickMsg);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     // InterruptedException is expected during shutdown, not an error
@@ -640,17 +584,6 @@ public class SimulationEngine implements IControllable, Runnable {
         }
 
         return new RawTickState(simulation.getCurrentTick(), organisms, cells);
-    }
-
-    private static void iterate(int[] shape, int dim, int[] coord, Runnable visitor) {
-        if (dim == shape.length) {
-            visitor.run();
-            return;
-        }
-        for (int i = 0; i < shape[dim]; i++) {
-            coord[dim] = i;
-            iterate(shape, dim + 1, coord, visitor);
-        }
     }
 
     private static void iterateOptimized(int[] shape, int dim, int[] coord, Runnable visitor) {

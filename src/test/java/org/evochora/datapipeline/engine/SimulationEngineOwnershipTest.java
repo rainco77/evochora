@@ -6,6 +6,8 @@ import org.evochora.runtime.isa.Instruction;
 import org.evochora.runtime.model.EnvironmentProperties;
 import org.evochora.datapipeline.queue.InMemoryTickQueue;
 import org.evochora.datapipeline.queue.ITickMessageQueue;
+import org.evochora.datapipeline.contracts.IQueueMessage;
+import org.evochora.datapipeline.channel.inmemory.InMemoryChannel;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Tag;
@@ -14,21 +16,25 @@ import org.junit.jupiter.api.AfterEach;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.BooleanSupplier;
+import java.util.Map;
+import java.util.HashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 @Tag("integration")
 class SimulationEngineOwnershipTest {
 
-    private ITickMessageQueue queue;
+    private InMemoryChannel<IQueueMessage> channel;
     private SimulationEngine engine;
     private final EnvironmentProperties testEnvProps = new EnvironmentProperties(new int[]{10, 10}, true);
 
     @BeforeEach
     void setUp() {
         Instruction.init();
-        queue = new InMemoryTickQueue(1000);
-        engine = new SimulationEngine(queue, testEnvProps,
+        Map<String, Object> channelOptions = new HashMap<>();
+        channelOptions.put("capacity", 100);
+        channel = new InMemoryChannel<>(channelOptions);
+        engine = new SimulationEngine(channel, testEnvProps,
              new ArrayList<>(), new ArrayList<>());
     }
 
@@ -83,7 +89,7 @@ class SimulationEngineOwnershipTest {
         
         OrganismPlacement placement = OrganismPlacement.of(artifact, 1000, new int[]{0, 0});
         
-        SimulationEngine testEngine = new SimulationEngine(queue, testEnvProps,
+        SimulationEngine testEngine = new SimulationEngine(channel, testEnvProps,
              List.of(placement), new ArrayList<>());
         
         testEngine.start();
@@ -116,7 +122,7 @@ class SimulationEngineOwnershipTest {
         OrganismPlacement placement1 = OrganismPlacement.of(artifact1, 1000, new int[]{0, 0});
         OrganismPlacement placement2 = OrganismPlacement.of(artifact2, 1000, new int[]{5, 5});
         
-        SimulationEngine testEngine = new SimulationEngine(queue, testEnvProps,
+        SimulationEngine testEngine = new SimulationEngine(channel, testEnvProps,
              List.of(placement1, placement2), new ArrayList<>());
         
         testEngine.start();

@@ -138,7 +138,6 @@ class ConfigurationTest {
         
         // Test that we can access nested properties without errors
         assertNotNull(config.pipeline.simulation.autoStart);
-        assertNotNull(config.pipeline.simulation.outputPath);
         //assertNotNull(config.pipeline.simulation.checkpointPauseTicks);
         
         assertNotNull(config.pipeline.indexer.autoStart);
@@ -148,6 +147,7 @@ class ConfigurationTest {
         
         assertNotNull(config.pipeline.persistence.autoStart);
         assertNotNull(config.pipeline.persistence.batchSize);
+        assertNotNull(config.pipeline.persistence.outputPath);
         
         assertNotNull(config.pipeline.server.autoStart);
         assertNotNull(config.pipeline.server.inputPath);

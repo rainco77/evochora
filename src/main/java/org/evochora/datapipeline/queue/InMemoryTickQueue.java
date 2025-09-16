@@ -50,6 +50,11 @@ public final class InMemoryTickQueue implements ITickMessageQueue {
         return delegate.size();
     }
 
+    @Override
+    public int getCapacity() {
+        return delegate.remainingCapacity() + delegate.size();
+    }
+
 
     /**
      * Checks if the queue can accept another message.

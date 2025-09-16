@@ -313,17 +313,9 @@ public final class CommandLineInterface {
             }
         }
         
-        // Create queue with configured message count limit
-        int maxMessageCount = 10000; // 10000 messages default
-        if (this.cfg.pipeline != null && this.cfg.pipeline.simulation != null) {
-            if (this.cfg.pipeline.simulation.maxMessageCount != null) {
-                maxMessageCount = this.cfg.pipeline.simulation.maxMessageCount;
-            }
-        }
-        
-        this.queue = new InMemoryTickQueue(maxMessageCount);
-        
-        this.serviceManager = new ServiceManager(queue, cfg);
+        // The entire block for creating the queue is removed, as this is now handled
+        // by the ServiceManager based on the channel configuration.
+        this.serviceManager = new ServiceManager(cfg);
 
         BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
         System.out.println("Evochora CLI ready. Commands: start | pause | resume | status | help | exit");

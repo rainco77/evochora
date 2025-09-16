@@ -110,18 +110,12 @@ public final class ConfigLoader {
         
         SimulationConfiguration.SimulationServiceConfig simService = new SimulationConfiguration.SimulationServiceConfig();
         simService.autoStart = true;
-        simService.outputPath = "runs/";
+        simService.skipProgramArtefact = false;
         pipelineConfig.simulation = simService;
-        
-        SimulationConfiguration.IndexerServiceConfig indexerService = new SimulationConfiguration.IndexerServiceConfig();
-        indexerService.autoStart = true;
-        indexerService.inputPath = "runs/";
-        indexerService.outputPath = "runs/";
-        indexerService.batchSize = 1000;
-        pipelineConfig.indexer = indexerService;
         
         SimulationConfiguration.PersistenceServiceConfig persistenceService = new SimulationConfiguration.PersistenceServiceConfig();
         persistenceService.autoStart = true;
+        persistenceService.outputPath = "runs/";
         persistenceService.batchSize = 1000;
         pipelineConfig.persistence = persistenceService;
         

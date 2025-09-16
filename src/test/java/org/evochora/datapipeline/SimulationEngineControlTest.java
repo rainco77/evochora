@@ -3,8 +3,6 @@ package org.evochora.datapipeline;
 import org.evochora.datapipeline.contracts.IQueueMessage;
 import org.evochora.datapipeline.contracts.raw.RawTickState;
 import org.evochora.datapipeline.engine.SimulationEngine;
-import org.evochora.datapipeline.queue.InMemoryTickQueue;
-import org.evochora.datapipeline.queue.ITickMessageQueue;
 import org.evochora.runtime.model.EnvironmentProperties;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -13,10 +11,13 @@ import org.junit.jupiter.api.Tag;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.ArrayList;
+import java.util.Optional;
+import java.util.Map;
+import java.util.HashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.evochora.datapipeline.channel.inmemory.InMemoryChannel;
 
 /**
  * Contains integration tests for the lifecycle control of the {@link SimulationEngine}.
@@ -26,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SimulationEngineControlTest {
 
     private SimulationEngine sim;
+    private InMemoryChannel<IQueueMessage> channel;
 
     @AfterEach
     void tearDown() {
@@ -101,8 +103,10 @@ class SimulationEngineControlTest {
     @Test
     @Tag("integration")
     void simple_start_shutdown_test() throws Exception {
-        ITickMessageQueue q = new InMemoryTickQueue(1000);
-        sim = new SimulationEngine(q, new EnvironmentProperties(new int[]{10, 10}, true), 
+        Map<String, Object> channelOptions = new HashMap<>();
+        channelOptions.put("capacity", 1000);
+        channel = new InMemoryChannel<>(channelOptions);
+        sim = new SimulationEngine(channel, new EnvironmentProperties(new int[]{10, 10}, true), 
              new ArrayList<>(), new ArrayList<>());
 
         sim.start();
@@ -130,15 +134,17 @@ class SimulationEngineControlTest {
     @Test
     @Tag("integration")
     void start_pause_resume_shutdown_cycle_advances_ticks() throws Exception {
-        ITickMessageQueue q = new InMemoryTickQueue(1000);
-        sim = new SimulationEngine(q, new EnvironmentProperties(new int[]{10, 10}, true), 
+        Map<String, Object> channelOptions = new HashMap<>();
+        channelOptions.put("capacity", 1000);
+        channel = new InMemoryChannel<>(channelOptions);
+        sim = new SimulationEngine(channel, new EnvironmentProperties(new int[]{10, 10}, true), 
              new ArrayList<>(), new ArrayList<>());
 
         sim.start();
 
         // 1. Wait for the simulation to initialize and produce the first tick.
         waitForTick(0, 5000);
-        IQueueMessage initialMessage = q.poll(5, TimeUnit.SECONDS);
+        IQueueMessage initialMessage = channel.take();
         assertThat(initialMessage).isNotNull();
         long initialTick = ((RawTickState) initialMessage).tickNumber();
         assertThat(initialTick).isGreaterThanOrEqualTo(0L);
@@ -155,27 +161,24 @@ class SimulationEngineControlTest {
             1000,
             "simulation to pause"
         ));
-        long t3 = sim.getCurrentTick();
+        long tickAfterPause = sim.getCurrentTick();
 
-        // 4. Drain the queue AFTER pausing.
-        while (q.poll() != null) {
-            // do nothing
+        // 4. (MODIFIED) Drain any potential in-flight message after pausing.
+        // This part of the test can only run if the channel supports polling.
+        while(channel.poll().isPresent()) {
+             // draining...
         }
 
-        // 5. Wait and assert that the queue REMAINS empty.
-        assertTrue(waitForCondition(
-            () -> q.size() == 0,
-            1000,
-            "queue to remain empty while paused"
-        ));
-        assertThat(q.size()).as("Queue should remain empty while paused").isZero();
-        assertThat(sim.getCurrentTick()).isEqualTo(t3);
+        // 5. Assert that no NEW ticks arrive while paused.
+        Optional<IQueueMessage> messageDuringPause = channel.poll(200, TimeUnit.MILLISECONDS);
+        assertThat(messageDuringPause).isEmpty();
+        assertThat(sim.getCurrentTick()).isEqualTo(tickAfterPause);
 
         // 6. Resume and wait for the next message.
         sim.resume();
-        IQueueMessage nextMessage = q.poll(5, TimeUnit.SECONDS);
+        IQueueMessage nextMessage = channel.take(); // take() is fine here, test will timeout if it fails
         assertThat(nextMessage).isNotNull();
-        assertThat(((RawTickState) nextMessage).tickNumber()).isGreaterThan(t3);
+        assertThat(((RawTickState) nextMessage).tickNumber()).isGreaterThan(tickAfterPause);
 
         // 7. Shutdown.
         sim.shutdown();
@@ -191,8 +194,10 @@ class SimulationEngineControlTest {
     @Test
     @Tag("integration")
     void minimal_shutdown_test() throws Exception {
-        ITickMessageQueue q = new InMemoryTickQueue(1000);
-        sim = new SimulationEngine(q, new EnvironmentProperties(new int[]{10, 10}, true), 
+        Map<String, Object> channelOptions = new HashMap<>();
+        channelOptions.put("capacity", 1000);
+        channel = new InMemoryChannel<>(channelOptions);
+        sim = new SimulationEngine(channel, new EnvironmentProperties(new int[]{10, 10}, true), 
              new ArrayList<>(), new ArrayList<>());
 
         sim.start();
@@ -218,8 +223,10 @@ class SimulationEngineControlTest {
     @Test
     @Tag("integration")
     void immediate_shutdown_test() throws Exception {
-        ITickMessageQueue q = new InMemoryTickQueue(1000);
-        sim = new SimulationEngine(q, new EnvironmentProperties(new int[]{5, 5}, true), 
+        Map<String, Object> channelOptions = new HashMap<>();
+        channelOptions.put("capacity", 1000);
+        channel = new InMemoryChannel<>(channelOptions);
+        sim = new SimulationEngine(channel, new EnvironmentProperties(new int[]{5, 5}, true), 
              new ArrayList<>(), new ArrayList<>());
 
         sim.start();

@@ -11,6 +11,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.util.concurrent.TimeUnit;
+import java.util.HashMap;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -51,6 +52,24 @@ class CommandLineInterfaceTest {
         config.pipeline.persistence = new SimulationConfiguration.PersistenceServiceConfig();
         config.pipeline.indexer = new SimulationConfiguration.IndexerServiceConfig();
         config.pipeline.server = new SimulationConfiguration.ServerServiceConfig();
+
+        // Disable auto-start for all services, as the test will start them manually.
+        config.pipeline.simulation.autoStart = false;
+        config.pipeline.persistence.autoStart = false;
+        config.pipeline.indexer.autoStart = false;
+        config.pipeline.server.autoStart = false;
+
+        // Define the communication channel required by the services.
+        config.pipeline.channels = new HashMap<>();
+        SimulationConfiguration.ChannelConfig channelConfig = new SimulationConfiguration.ChannelConfig();
+        channelConfig.className = "org.evochora.datapipeline.channel.inmemory.InMemoryChannel";
+        channelConfig.options = new HashMap<>();
+        channelConfig.options.put("capacity", 1000);
+        config.pipeline.channels.put("sim-to-persist", channelConfig);
+
+        // Link the services to the channel.
+        config.pipeline.simulation.outputChannel = "sim-to-persist";
+        config.pipeline.persistence.inputChannel = "sim-to-persist";
 
         cli = new CommandLineInterface(config);
         
@@ -98,8 +117,8 @@ class CommandLineInterfaceTest {
         // Then: Verify all essential functionality worked
         String output = outputStream.toString();
         
-        // Verify CLI startup and help
-        assertTrue(output.contains("Evochora CLI ready") || output.contains("Commands:"), 
+        // Verify CLI startup and help message (response to the 'help' command)
+        assertTrue(output.contains("Evochora CLI Commands:"),
                    "CLI should show startup message and available commands");
         
         // Verify service start

@@ -45,7 +45,7 @@ class ConfigLoaderTest {
         // Check pipeline config - these should match the hardcoded fallback defaults
         assertThat(expectedFallback.pipeline.simulation).isNotNull();
         assertThat(expectedFallback.pipeline.simulation.autoStart).isTrue();
-        assertThat(expectedFallback.pipeline.simulation.outputPath).isEqualTo("runs/");
+        assertThat(expectedFallback.pipeline.persistence.outputPath).isEqualTo("runs/");
         
         assertThat(expectedFallback.pipeline.indexer).isNotNull();
         assertThat(expectedFallback.pipeline.indexer.autoStart).isTrue();
@@ -57,6 +57,8 @@ class ConfigLoaderTest {
         assertThat(expectedFallback.pipeline.server.inputPath).isEqualTo("runs/");
         assertThat(expectedFallback.pipeline.server.port).isEqualTo(7070);
         assertThat(expectedFallback.pipeline.server.host).isEqualTo("localhost");
+        // Change assertions to check for outputPath in the correct location
+        assertThat(expectedFallback.pipeline.persistence.outputPath).isEqualTo("runs/");
     }
     
     /**
@@ -80,7 +82,6 @@ class ConfigLoaderTest {
         
         SimulationConfiguration.SimulationServiceConfig simService = new SimulationConfiguration.SimulationServiceConfig();
         simService.autoStart = true;
-        simService.outputPath = "runs/";
         pipelineConfig.simulation = simService;
         
         SimulationConfiguration.IndexerServiceConfig indexerService = new SimulationConfiguration.IndexerServiceConfig();
@@ -93,6 +94,7 @@ class ConfigLoaderTest {
         SimulationConfiguration.PersistenceServiceConfig persistenceService = new SimulationConfiguration.PersistenceServiceConfig();
         persistenceService.autoStart = true;
         persistenceService.batchSize = 1000;
+        persistenceService.outputPath = "runs/";
         pipelineConfig.persistence = persistenceService;
         
         SimulationConfiguration.ServerServiceConfig serverService = new SimulationConfiguration.ServerServiceConfig();

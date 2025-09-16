@@ -29,7 +29,6 @@
         "placement": {
           // [MANDATORY] Placement strategy type ("fixed", "random", "grid")
           "strategy": "fixed",
-          // [MANDATORY] Specific positions to place organisms (for "fixed" strategy)
           "positions": [
             [1, 1]
           ]
@@ -182,18 +181,29 @@
   // PIPELINE CONFIGURATION
   // ============================================================================
   "pipeline": {
+    // [OPTIONAL] Defines the communication channels between services.
+    "channels": {
+      // A named channel for connecting the simulation to the persistence service.
+      "simulation-to-persistence": {
+        // The fully qualified class name of the channel implementation.
+        "className": "org.evochora.datapipeline.channel.inmemory.InMemoryChannel",
+        // Channel-specific options passed to its constructor.
+        "options": {
+          // The maximum number of messages the channel can hold before blocking.
+          "capacity": 10000
+        }
+      }
+    },
     // [OPTIONAL] Simulation pipeline configuration (default: autoStart=true, outputPath="runs/")
     "simulation": {
       // [OPTIONAL] Whether to automatically start simulation when pipeline starts (default: true)
       "autoStart": true,
-      // [OPTIONAL] Directory path where simulation output files are stored (default: "runs/")
-      "outputPath": "runs/",
+      // The name of the channel to which the simulation engine will send its data.
+      "outputChannel": "simulation-to-persistence",
       // [OPTIONAL] Tick numbers at which simulation should automatically pause (default: null)
       "checkpointPauseTicks": [50000, 100000, 150000, 200000],
       // [OPTIONAL] Whether to skip ProgramArtifact features (default: false)
-      "skipProgramArtefact": false,
-      // [OPTIONAL] Maximum number of messages in queue (default: 10000)
-      "maxMessageCount": 10000
+      "skipProgramArtefact": false
     },
 
     // [OPTIONAL] Persistence service configuration (default: autoStart=true, batchSize=1000)
@@ -202,6 +212,10 @@
       "autoStart": true,
       // [OPTIONAL] Number of database operations to batch together for performance (default: 1000)
       "batchSize": 1000,
+      // [OPTIONAL] Directory path where simulation output files are stored (default: "runs/")
+      "outputPath": "runs/",
+      // The name of the channel from which the persistence service will receive its data.
+      "inputChannel": "simulation-to-persistence",
       // [OPTIONAL] Database performance optimizations
       "database": {
         // [OPTIONAL] SQLite cache size in pages (default: 5000)
