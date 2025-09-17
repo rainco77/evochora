@@ -42,11 +42,17 @@ public class CommandLineInterface implements Callable<Integer> {
 
     private static final Logger log = LoggerFactory.getLogger(CommandLineInterface.class);
 
+    private final Config preloadedConfig;
+
     @Option(names = {"-c", "--config"}, description = "Path to the HOCON configuration file.")
     File configFile;
 
     @Option(names = "-D", mapFallbackValue = "", description = "Override a HOCON configuration value. For example: -Dpipeline.services.simulation.enabled=false")
     Map<String, String> hoconOverrides;
+
+    public CommandLineInterface(Config preloadedConfig) {
+        this.preloadedConfig = preloadedConfig;
+    }
 
     /**
      * The main execution method for the command-line interface, called by picocli.
@@ -174,37 +180,18 @@ public class CommandLineInterface implements Callable<Integer> {
      * @return The fully resolved and merged {@link Config} object.
      */
     Config loadConfiguration() {
-        // Precedence: Hardcoded Defaults -> File -> CLI Arguments -> Environment Variables
-        // `withFallback` means the object calling it has precedence.
-        // So we build from lowest to highest precedence.
-
-        // 1. Hardcoded defaults in reference.conf
-        Config defaultConfig = ConfigFactory.parseResources("reference.conf");
-
-        // 2. User-provided config file
-        Config fileConfig = configFile != null
-                ? ConfigFactory.parseFile(configFile)
-                : ConfigFactory.empty();
-
-        // 3. CLI -D arguments
+        // The initial config is pre-loaded in Main to set up logging.
+        // Now, we layer the CLI overrides on top of it.
         Config cliConfig = hoconOverrides != null
                 ? ConfigFactory.parseMap(hoconOverrides)
                 : ConfigFactory.empty();
 
-        // 4. Environment variables
-        // This is a simplified approach. A real implementation might need to
-        // map env var names (e.g., PIPELINE_SERVICES_SIM_OPT_ORGANISM) to HOCON paths.
-        // For now, we rely on the standard `config.resolve()` which can handle
-        // substitutions from env vars, e.g., `key = ${?MY_ENV_VAR}`.
         Config envConfig = ConfigFactory.systemEnvironment();
 
-
-        // Combine them in the correct order of precedence.
         return envConfig
                 .withFallback(cliConfig)
-                .withFallback(fileConfig)
-                .withFallback(defaultConfig)
-                .resolve(); // resolve substitutions
+                .withFallback(preloadedConfig)
+                .resolve();
     }
 
     /**
@@ -217,11 +204,8 @@ public class CommandLineInterface implements Callable<Integer> {
      * @param args The command-line arguments passed to the application.
      */
     public static void main(String[] args) {
-        int exitCode = new CommandLine(new CommandLineInterface()).execute(args);
-        // Don't exit if we are in interactive mode (exit code 0 from call())
-        // Picocli will exit automatically for subcommands.
-        if (exitCode != 0) {
-            System.exit(exitCode);
-        }
+        // This main method is now only for picocli's own help generation.
+        // The actual application entry point is in org.evochora.datapipeline.Main.
+        new CommandLine(new CommandLineInterface(ConfigFactory.empty())).execute(args);
     }
 }

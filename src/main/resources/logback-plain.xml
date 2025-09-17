@@ -3,17 +3,19 @@
   <contextListener class="ch.qos.logback.classic.jul.LevelChangePropagator">
     <resetJUL>true</resetJUL>
   </contextListener>
-  
+
   <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
     <target>System.out</target>
-    <encoder class="net.logstash.logback.encoder.LogstashEncoder" />
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %highlight(%-5level) [%thread] %logger{36} - %msg%n</pattern>
+    </encoder>
   </appender>
 
   <!-- Suppress ALL framework logs completely -->
   <logger name="SLF4J" level="OFF" additivity="false"/>
   <logger name="org.slf4j" level="OFF" additivity="false"/>
   <logger name="ch.qos.logback" level="OFF" additivity="false"/>
-  
+
   <!-- Suppress Javalin/Jetty completely -->
   <logger name="io.javalin" level="OFF" additivity="false"/>
   <logger name="org.eclipse.jetty" level="OFF" additivity="false"/>
@@ -22,7 +24,7 @@
   <logger name="org.eclipse.jetty.io" level="OFF" additivity="false"/>
   <logger name="org.eclipse.jetty.http" level="OFF" additivity="false"/>
 
-icht ma  <!-- Evochora-spezifische Logger - Level wird zur Laufzeit konfiguriert -->
+  <!-- Evochora-spezifische Logger - Level wird zur Laufzeit konfiguriert -->
   <logger name="org.evochora" additivity="false">
     <appender-ref ref="STDOUT" />
   </logger>
@@ -40,5 +42,3 @@ icht ma  <!-- Evochora-spezifische Logger - Level wird zur Laufzeit konfiguriert
     <appender-ref ref="STDOUT" />
   </root>
 </configuration>
-
-
