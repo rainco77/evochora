@@ -11,7 +11,7 @@ import java.util.concurrent.TimeUnit;
  */
 public final class InMemoryTickQueue implements ITickMessageQueue {
 
-    private final LinkedBlockingQueue<IQueueMessage> delegate;
+    private final LinkedBlockingQueue<IQueueMessage> queue;
     private final int maxMessageCount;
 
     /**
@@ -21,38 +21,43 @@ public final class InMemoryTickQueue implements ITickMessageQueue {
      */
     public InMemoryTickQueue(int maxMessageCount) {
         this.maxMessageCount = maxMessageCount;
-        this.delegate = new LinkedBlockingQueue<>(maxMessageCount);
+        this.queue = new LinkedBlockingQueue<>(maxMessageCount);
     }
 
 
     @Override
     public void put(IQueueMessage message) throws InterruptedException {
-        delegate.put(message);
+        queue.put(message);
     }
 
     @Override
     public IQueueMessage take() throws InterruptedException {
-        return delegate.take();
+        return queue.take();
     }
 
     @Override
     public IQueueMessage poll(long timeout, TimeUnit unit) throws InterruptedException {
-        return delegate.poll(timeout, unit);
+        return queue.poll(timeout, unit);
     }
 
     @Override
     public IQueueMessage poll() {
-        return delegate.poll();
+        return queue.poll();
     }
 
     @Override
     public int size() {
-        return delegate.size();
+        return queue.size();
     }
 
     @Override
     public int getCapacity() {
-        return delegate.remainingCapacity() + delegate.size();
+        return queue.remainingCapacity() + queue.size();
+    }
+
+    @Override
+    public void clear() {
+        queue.clear();
     }
 
 
@@ -62,7 +67,7 @@ public final class InMemoryTickQueue implements ITickMessageQueue {
      * @return true if there is space for another message
      */
     public boolean canAcceptMessage() {
-        return delegate.remainingCapacity() > 0;
+        return queue.remainingCapacity() > 0;
     }
 
     /**
@@ -74,7 +79,7 @@ public final class InMemoryTickQueue implements ITickMessageQueue {
      */
     public boolean tryPut(IQueueMessage message) {
         try {
-            return delegate.offer(message, 1, TimeUnit.MILLISECONDS);
+            return queue.offer(message, 1, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
@@ -87,7 +92,7 @@ public final class InMemoryTickQueue implements ITickMessageQueue {
      * @return the current message count
      */
     public int getCurrentMessageCount() {
-        return delegate.size();
+        return queue.size();
     }
 
     /**

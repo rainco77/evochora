@@ -61,6 +61,8 @@ public final class SimulationConfiguration {
 
     public static final class IndexerServiceConfig {
         public boolean autoStart;
+        public String inputChannel;
+        public String inputSource = "sqlite";
         public String inputPath;
         public String outputPath;
         public int batchSize = 1000; // Default batch size
@@ -74,6 +76,7 @@ public final class SimulationConfiguration {
         public Boolean autoStart = true;
         public String inputChannel;
         public String outputPath = "runs/"; // <-- ADDED
+        public String outputChannel;
         public int batchSize = 1000; // Default batch size
         public String jdbcUrl;
         public DatabaseConfig database = new DatabaseConfig(); // Default database settings

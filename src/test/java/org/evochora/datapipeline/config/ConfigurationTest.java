@@ -141,8 +141,8 @@ class ConfigurationTest {
         //assertNotNull(config.pipeline.simulation.checkpointPauseTicks);
         
         assertNotNull(config.pipeline.indexer.autoStart);
-        assertNotNull(config.pipeline.indexer.inputPath);
-        assertNotNull(config.pipeline.indexer.outputPath);
+        assertNotNull(config.pipeline.indexer.inputChannel);
+        assertNotNull(config.pipeline.indexer.inputSource);
         assertNotNull(config.pipeline.indexer.batchSize);
         
         assertNotNull(config.pipeline.persistence.autoStart);

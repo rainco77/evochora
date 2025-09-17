@@ -7,6 +7,10 @@ import org.evochora.compiler.internal.LinearizedProgramArtifact;
 import org.evochora.datapipeline.config.SimulationConfiguration;
 import org.evochora.runtime.model.EnvironmentProperties;
 import org.evochora.datapipeline.IControllable;
+import org.evochora.datapipeline.channel.IInputChannel;
+import org.evochora.datapipeline.contracts.IQueueMessage;
+import org.evochora.datapipeline.contracts.MetadataMessage;
+import org.evochora.datapipeline.contracts.ProgramArtifactMessage;
 import org.evochora.datapipeline.contracts.debug.PreparedTickState;
 import org.evochora.datapipeline.contracts.raw.RawTickState;
 import org.evochora.datapipeline.contracts.raw.RawOrganismState;
@@ -23,6 +27,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.TimeUnit;
 
 /**
  * DebugIndexer processes raw organism state data and generates debug information.
@@ -32,6 +37,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class DebugIndexer implements IControllable, Runnable {
 
     private static final Logger log = LoggerFactory.getLogger(DebugIndexer.class);
+
+    // Channel for the new data flow
+    private IInputChannel<IQueueMessage> inputChannel;
 
     // Queue configuration
     private static final int MAX_QUEUE_SIZE = 1000; // Maximum ticks to queue in memory
@@ -122,7 +130,16 @@ public class DebugIndexer implements IControllable, Runnable {
         this.queueProcessorThread.setDaemon(true);
     }
 
+    /**
+     * Sets the input channel for the service. This is used by the ServiceManager
+     * to inject the channel created by the ChannelFactory when inputSource is 'channel'.
+     * @param inputChannel The channel to read messages from.
+     */
+    public void setInputChannel(IInputChannel<IQueueMessage> inputChannel) {
+        this.inputChannel = inputChannel;
+    }
 
+    
     @Override
     public void start() {
         if (running.compareAndSet(false, true)) {
@@ -190,35 +207,21 @@ public class DebugIndexer implements IControllable, Runnable {
     @Override
     public void shutdown() {
         if (running.compareAndSet(true, false)) {
-            long currentTick = getLastProcessedTick();
-            double tps = calculateTPS();
-            // Only log if called from the service thread
-            if (Thread.currentThread().getName().equals("DebugIndexer")) {
-                log.info("DebugIndexer: graceful termination tick:{} TPS:{}", currentTick, String.format("%.2f", tps));
-            }
-
-            // Immediately perform database cleanup and WAL checkpointing to prevent WAL/SHM file leaks
-            // This ensures cleanup happens even if called from external threads (like CLI exit)
-            try {
-                log.debug("Performing immediate database cleanup during shutdown");
-                if (databaseManager.getBatchCount() > 0) {
-                    databaseManager.executeRemainingBatch();
-                    log.debug("Executed final batch during shutdown");
-                }
-                databaseManager.closeQuietly();
-                
-                // Also close the raw database connection
-                if (rawDbConnection != null && !rawDbConnection.isClosed()) {
-                    rawDbConnection.close();
-                }
-                
-                log.debug("Database cleanup completed during shutdown");
-            } catch (Exception e) {
-                log.warn("Error during shutdown database cleanup: {}", e.getMessage());
-            }
-
+            log.debug("Shutdown initiated for DebugIndexer.");
+            // Interrupt both threads
             thread.interrupt();
             queueProcessorThread.interrupt();
+
+            // Wait for the main processing thread to die
+            try {
+                thread.join(2000); // Wait up to 2 seconds
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("Interrupted while waiting for DebugIndexer main thread to shut down.");
+            }
+             if (thread.isAlive()) {
+                log.warn("DebugIndexer main thread did not terminate gracefully.");
+            }
 
             // Shutdown processing pool if it exists
             if (processingPool != null) {
@@ -362,6 +365,119 @@ public class DebugIndexer implements IControllable, Runnable {
 
     @Override
     public void run() {
+        running.set(true); // Signal that the thread is running
+        if ("channel".equalsIgnoreCase(config.inputSource)) {
+            runWithChannelInput();
+        } else {
+            runWithSqliteInput();
+        }
+    }
+
+    /**
+     * Main processing loop when reading from the new channel input.
+     */
+    private void runWithChannelInput() {
+        try {
+            boolean metadataReceived = false;
+            log.info("DebugIndexer started in CHANNEL input mode. Waiting for messages...");
+
+            while (running.get()) {
+                if (paused.get()) {
+                    // Simple pause logic, no auto-resume needed for channel-based input
+                    while (paused.get() && running.get()) {
+                        Thread.sleep(100);
+                    }
+                    continue;
+                }
+
+                // Poll for a message, but don't block forever to avoid startup deadlocks.
+                Optional<IQueueMessage> messageOpt = inputChannel.poll(200, TimeUnit.MILLISECONDS);
+
+                if (messageOpt.isEmpty()) {
+                    // If no message, just continue the loop. This allows the service
+                    // to respond to shutdown/pause signals even if no data is flowing.
+                    continue;
+                }
+
+                IQueueMessage message = messageOpt.get();
+
+                if (message instanceof MetadataMessage msg) {
+                    this.envProps = msg.environmentProperties();
+                    metadataReceived = true;
+                    writeSimulationMetadata(); // Persist metadata to its own debug DB
+                    log.info("Received and processed metadata from channel.");
+                } else if (message instanceof ProgramArtifactMessage msg) {
+                    if (!metadataReceived) {
+                        log.warn("Received ProgramArtifact before Metadata. Storing it, but this may cause issues.");
+                    }
+                    this.artifacts.put(msg.programId(), msg.programArtifact());
+                    writeSingleProgramArtifact(msg.programId(), msg.programArtifact());
+                } else if (message instanceof RawTickState msg) {
+                    if (!metadataReceived) {
+                        // This is a critical failure. If we get ticks before we know the world shape,
+                        // we cannot process them. We will log an error and wait, hoping metadata arrives.
+                        log.error("Received RawTick before Metadata. Tick {} will be ignored.", msg.tickNumber());
+                        continue;
+                    }
+                    // Process the single tick and write to the debug DB
+                    processSingleTickFromChannel(msg);
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.info("DebugIndexer (channel mode) thread interrupted.");
+        } finally {
+            log.debug("DebugIndexer (channel mode) thread terminating. Performing final cleanup.");
+            try {
+                databaseManager.executeRemainingBatch();
+            } catch (Exception e) {
+                log.warn("Error executing final batch on channel-mode shutdown: {}", e.getMessage());
+            }
+            databaseManager.closeQuietly();
+        }
+    }
+
+    /**
+     * Processes a single RawTickState received from a channel.
+     * @param rawTickState The tick state to process.
+     */
+    private void processSingleTickFromChannel(RawTickState rawTickState) {
+        try {
+            PreparedTickState preparedTick = tickProcessor.transformRawToPrepared(rawTickState, artifacts, envProps);
+            writePreparedTick(preparedTick);
+            nextTickToProcess = rawTickState.tickNumber() + 1;
+        } catch (Exception e) {
+            log.warn("Failed to process tick {} from channel: {}", rawTickState.tickNumber(), e.getMessage());
+        }
+    }
+
+    /**
+     * Writes a single program artifact to the debug database.
+     * @param programId The ID of the program.
+     * @param artifact The program artifact.
+     */
+    private void writeSingleProgramArtifact(String programId, ProgramArtifact artifact) {
+        if (databaseManager.isConnectionAvailable()) {
+            try (Connection conn = databaseManager.createOptimizedConnection(debugDbPath);
+                 PreparedStatement ps = conn.prepareStatement(
+                    "INSERT OR REPLACE INTO program_artifacts(program_id, artifact_json) VALUES (?, ?)")) {
+
+                byte[] jsonBytes = objectMapper.writeValueAsBytes(artifact);
+                ps.setString(1, programId);
+                ps.setBytes(2, jsonBytes);
+                ps.executeUpdate();
+            } catch (Exception e) {
+                log.error("Failed to write single program artifact {} to database: {}", programId, e.getMessage());
+            }
+        } else {
+             log.warn("Database not available, cannot write single program artifact {}.", programId);
+        }
+    }
+
+    /**
+     * Main processing loop when reading from the legacy SQLite input.
+     */
+    private void runWithSqliteInput() {
         try {
             loadInitialData();
             // Start processing from tick 0 (nextTickToProcess = 0L from initialization)
@@ -547,21 +663,17 @@ public class DebugIndexer implements IControllable, Runnable {
         } catch (Exception e) {
             log.error("DebugIndexer fatal error, terminating service: {}", e.getMessage());
         } finally {
-            // Log graceful termination from the service thread
-            if (Thread.currentThread().getName().equals("DebugIndexer")) {
-                long currentTick = getLastProcessedTick(); // Use getter method
-                double tps = calculateTPS();
-                log.info("DebugIndexer: graceful termination tick:{} TPS:{}", currentTick, String.format("%.2f", tps));
-            }
-
-            // Cleanup database resources
+            // This block ensures that all database connections are closed and resources
+            // are released when the thread terminates, for any reason.
+            log.debug("DebugIndexer thread terminating. Performing final cleanup.");
             try {
-                if (databaseManager.getBatchCount() > 0) {
-                    databaseManager.executeRemainingBatch();
-                    log.debug("Executed final batch during shutdown");
-                }
                 databaseManager.closeQuietly();
-            } catch (Exception ignored) {}
+                if (rawDbConnection != null && !rawDbConnection.isClosed()) {
+                    rawDbConnection.close();
+                }
+            } catch (Exception e) {
+                log.warn("Error during DebugIndexer final cleanup: {}", e.getMessage());
+            }
         }
     }
 

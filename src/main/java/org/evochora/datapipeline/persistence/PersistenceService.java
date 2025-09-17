@@ -3,7 +3,10 @@ package org.evochora.datapipeline.persistence;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.evochora.datapipeline.IControllable;
 import org.evochora.datapipeline.channel.IInputChannel;
+import org.evochora.datapipeline.channel.IOutputChannel;
+import org.evochora.datapipeline.channel.ChannelFactory;
 import org.evochora.datapipeline.contracts.IQueueMessage;
+import org.evochora.datapipeline.contracts.MetadataMessage;
 import org.evochora.datapipeline.contracts.ProgramArtifactMessage;
 import org.evochora.datapipeline.contracts.raw.RawTickState; // NEU
 import org.evochora.runtime.model.EnvironmentProperties;
@@ -35,6 +38,7 @@ public final class PersistenceService implements IControllable, Runnable {
     private static final Logger log = LoggerFactory.getLogger(PersistenceService.class);
 
     private final IInputChannel<IQueueMessage> inputChannel;
+    private IOutputChannel<IQueueMessage> outputChannel;
     private final Thread thread;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean paused = new AtomicBoolean(false);
@@ -93,6 +97,12 @@ public final class PersistenceService implements IControllable, Runnable {
     @Override
     public void start() {
         if (running.compareAndSet(false, true)) {
+            // Setup the output channel if configured
+            if (config.outputChannel != null) {
+                // We need a full pipeline config to create channels, which we don't have here.
+                // This will be properly injected in the ServiceManager. For now, we handle null.
+                // A better approach would be to pass the ChannelFactory in the constructor.
+            }
             setupDatabase();
             thread.start();
         }
@@ -120,35 +130,17 @@ public final class PersistenceService implements IControllable, Runnable {
     @Override
     public void shutdown() {
         if (running.compareAndSet(true, false)) {
-            long currentTick = getLastPersistedTick();
-            double tps = calculateTPS();
-            // Only log if called from the service thread
-            if (Thread.currentThread().getName().equals("PersistenceService")) {
-                log.info("PersistenceService: graceful termination tick:{} TPS:{}", currentTick, String.format("%.2f", tps));
-            }
-            
-            // Immediately perform database cleanup and WAL checkpointing to prevent WAL/SHM file leaks
-            // This ensures cleanup happens even if called from external threads (like CLI exit)
-            try {
-                log.debug("Performing immediate database cleanup during shutdown");
-                // Execute any remaining batch operations before closing
-                if (tickInsertStatement != null && batchCount % config.batchSize != 0) {
-                    tickInsertStatement.executeBatch();
-                    actualBatchCount++; // Increment actual batch count
-                    log.debug("Executed final batch of {} ticks during shutdown", batchCount % config.batchSize);
-                }
-                closeQuietly();
-                log.debug("Database cleanup completed during shutdown");
-            } catch (Exception e) {
-                log.warn("Error during shutdown database cleanup: {}", e.getMessage());
-            }
-            
+            log.debug("Shutdown initiated for PersistenceService.");
             thread.interrupt();
-            // Wait a bit for the thread to finish processing current messages
             try {
-                Thread.sleep(100);
+                // Wait for the service thread to die to ensure resources are released.
+                thread.join(2000); // Wait up to 2 seconds
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                log.warn("Interrupted while waiting for PersistenceService to shut down.");
+            }
+            if (thread.isAlive()) {
+                log.warn("PersistenceService thread did not terminate gracefully.");
             }
         }
     }
@@ -354,7 +346,9 @@ public final class PersistenceService implements IControllable, Runnable {
 
     @Override
     public void run() {
+        running.set(true); // Signal that the thread is running
         try {
+            boolean metadataSent = false;
             while (running.get()) {
                 if (paused.get()) {
                     // Simple pause logic without auto-resume
@@ -368,6 +362,17 @@ public final class PersistenceService implements IControllable, Runnable {
 
                 // Wait for the first message
                 messages.add(inputChannel.take());
+
+                // --- NEW LOGIC: Send MetadataMessage on first message ---
+                if (outputChannel != null && !metadataSent) {
+                    try {
+                        outputChannel.send(new MetadataMessage(envProps));
+                        metadataSent = true;
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        log.warn("Interrupted while sending metadata message.");
+                    }
+                }
 
                 // Drain any additional messages that are immediately available
                 while (messages.size() < config.batchSize) {
@@ -410,12 +415,10 @@ public final class PersistenceService implements IControllable, Runnable {
             Thread.currentThread().interrupt();
             log.info("PersistenceService thread interrupted.");
         } finally {
-            // Log graceful termination from the service thread
-            if (Thread.currentThread().getName().equals("PersistenceService")) {
-                long currentTick = getLastPersistedTick();
-                double tps = calculateTPS();
-                log.info("PersistenceService: graceful termination tick:{} TPS:{}", currentTick, String.format("%.2f", tps));
-            }
+            // This block ensures that database connections are closed and resources are
+            // released when the thread terminates, for any reason.
+            log.debug("PersistenceService thread terminating. Performing final cleanup.");
+            closeQuietly();
         }
     }
 
@@ -447,6 +450,15 @@ public final class PersistenceService implements IControllable, Runnable {
         }
     }
 
+    /**
+     * Sets the output channel for the service. This is used by the ServiceManager
+     * to inject the channel created by the ChannelFactory.
+     * @param outputChannel The channel to send messages to.
+     */
+    public void setOutputChannel(IOutputChannel<IQueueMessage> outputChannel) {
+        this.outputChannel = outputChannel;
+    }
+
     private void handleProgramArtifact(ProgramArtifactMessage pam) throws Exception {
         // Konvertierung zu linearisiertem Format für Jackson-Serialisierung
         // Wir brauchen die EnvironmentProperties für die Linearisierung
@@ -470,9 +482,20 @@ public final class PersistenceService implements IControllable, Runnable {
             log.warn("Failed to serialize program artifact {}: {}", pam.programId(), e.getMessage());
             throw e;
         }
+
+        // --- NEW LOGIC: Send to output channel ---
+        if (outputChannel != null) {
+            try {
+                outputChannel.send(pam);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("Interrupted while sending program artifact message.");
+            }
+        }
     }
 
     private void handleRawTick(RawTickState rts) throws Exception {
+        // --- OLD LOGIC: Write to SQLite ---
         try {
             // Ensure database connection is available
             if (connection == null || connection.isClosed()) {
@@ -512,6 +535,16 @@ public final class PersistenceService implements IControllable, Runnable {
         } catch (Exception e) {
             log.warn("Failed to serialize raw tick {}: {}", rts.tickNumber(), e.getMessage());
             throw e;
+        }
+
+        // --- NEW LOGIC: Send to output channel ---
+        if (outputChannel != null) {
+            try {
+                outputChannel.send(rts);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("Interrupted while sending raw tick message.");
+            }
         }
     }
 }

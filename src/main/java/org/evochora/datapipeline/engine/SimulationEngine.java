@@ -206,13 +206,18 @@ public class SimulationEngine implements IControllable, Runnable {
     @Override
     public void shutdown() {
         if (running.compareAndSet(true, false)) {
-            long currentTick = getCurrentTick();
-            double tps = calculateTPS();
-            // Only log if called from the service thread
-            if (Thread.currentThread().getName().equals("SimulationEngine")) {
-                log.info("SimulationEngine: graceful termination tick:{} TPS:{}", currentTick, String.format("%.2f", tps));
-            }
+            log.debug("Shutdown initiated for SimulationEngine.");
             thread.interrupt();
+            try {
+                // Wait for the service thread to die to ensure clean termination.
+                thread.join(2000); // Wait up to 2 seconds
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("Interrupted while waiting for SimulationEngine to shut down.");
+            }
+            if (thread.isAlive()) {
+                log.warn("SimulationEngine thread did not terminate gracefully.");
+            }
         }
     }
     
@@ -330,6 +335,7 @@ public class SimulationEngine implements IControllable, Runnable {
 
     @Override
     public void run() {
+        running.set(true); // Signal that the thread is running
         try {
             var env = new org.evochora.runtime.model.Environment(this.environmentProperties);
             simulation = new Simulation(env); // Always run in debug mode
@@ -434,7 +440,8 @@ public class SimulationEngine implements IControllable, Runnable {
                             log.debug("Sent ProgramArtifact {} to persistence queue", entry.getKey());
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
-                            return;
+                            log.warn("[Engine] Interrupted while sending ProgramArtifact. Terminating.");
+                            return; // <-- EXIT THREAD
                         } catch (Exception e) {
                             log.warn("Failed to send ProgramArtifact {} to persistence queue: {}", entry.getKey(), e.getMessage());
                         }
@@ -450,7 +457,8 @@ public class SimulationEngine implements IControllable, Runnable {
                 log.debug("Sent initial tick state (tick 0) to queue");
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return;
+                log.warn("[Engine] Interrupted while sending initial tick. Terminating.");
+                return; // <-- EXIT THREAD
             }
             
             // Start simulation loop
@@ -503,7 +511,8 @@ public class SimulationEngine implements IControllable, Runnable {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     // InterruptedException is expected during shutdown, not an error
-                    break;
+                    log.info("[Engine] Interrupted in main loop. Terminating.");
+                    return; // <-- EXIT THREAD
                 } catch (Exception e) {
                     if (running.get()) {
                         log.error("Simulation tick failed, terminating service: {}", e.getMessage());

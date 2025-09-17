@@ -28,17 +28,45 @@ class SimulationEngineControlTest {
 
     private SimulationEngine sim;
     private InMemoryChannel<IQueueMessage> channel;
+    private Thread drainThread; // Thread to drain the channel
+
+    @org.junit.jupiter.api.BeforeEach
+    void setUp() {
+        Map<String, Object> channelOptions = new HashMap<>();
+        channelOptions.put("capacity", 100); // Small capacity for testing
+        channel = new InMemoryChannel<>(channelOptions);
+
+        // This sim instance is now consistently used by all tests and managed by tearDown
+        sim = new SimulationEngine(channel, new EnvironmentProperties(new int[]{10, 10}, true),
+                new ArrayList<>(), new ArrayList<>());
+
+        drainThread = new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    // Use take() to aggressively drain the queue and respond to interrupts
+                    channel.take();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        drainThread.setDaemon(true);
+        drainThread.start();
+    }
 
     @AfterEach
     void tearDown() {
         if (sim != null && sim.isRunning()) {
             sim.shutdown();
-            // Wait for shutdown to complete
             try {
-                waitForShutdown(1000);
+                waitForShutdown(2000); // Wait for engine to stop
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        }
+        // Stop the consumer thread AFTER the producer is stopped
+        if (drainThread != null) {
+            drainThread.interrupt();
         }
     }
 
@@ -88,6 +116,7 @@ class SimulationEngineControlTest {
      * @throws InterruptedException if the thread is interrupted while waiting.
      */
     private void waitForShutdown(long timeoutMillis) throws InterruptedException {
+        // Use the class member 'sim' which is managed by tearDown
         assertTrue(waitForCondition(
             () -> !sim.isRunning(),
             timeoutMillis,
@@ -103,12 +132,7 @@ class SimulationEngineControlTest {
     @Test
     @Tag("integration")
     void simple_start_shutdown_test() throws Exception {
-        Map<String, Object> channelOptions = new HashMap<>();
-        channelOptions.put("capacity", 1000);
-        channel = new InMemoryChannel<>(channelOptions);
-        sim = new SimulationEngine(channel, new EnvironmentProperties(new int[]{10, 10}, true), 
-             new ArrayList<>(), new ArrayList<>());
-
+        // This test can use the default engine from setUp
         sim.start();
 
         // Wait for simulation to start and produce some ticks
@@ -134,12 +158,7 @@ class SimulationEngineControlTest {
     @Test
     @Tag("integration")
     void start_pause_resume_shutdown_cycle_advances_ticks() throws Exception {
-        Map<String, Object> channelOptions = new HashMap<>();
-        channelOptions.put("capacity", 1000);
-        channel = new InMemoryChannel<>(channelOptions);
-        sim = new SimulationEngine(channel, new EnvironmentProperties(new int[]{10, 10}, true), 
-             new ArrayList<>(), new ArrayList<>());
-
+        // This test can use the default engine from setUp
         sim.start();
 
         // 1. Wait for the simulation to initialize and produce the first tick.
@@ -194,12 +213,7 @@ class SimulationEngineControlTest {
     @Test
     @Tag("integration")
     void minimal_shutdown_test() throws Exception {
-        Map<String, Object> channelOptions = new HashMap<>();
-        channelOptions.put("capacity", 1000);
-        channel = new InMemoryChannel<>(channelOptions);
-        sim = new SimulationEngine(channel, new EnvironmentProperties(new int[]{10, 10}, true), 
-             new ArrayList<>(), new ArrayList<>());
-
+        // This test can use the default engine from setUp
         sim.start();
 
         // Wait for simulation to start
@@ -223,20 +237,19 @@ class SimulationEngineControlTest {
     @Test
     @Tag("integration")
     void immediate_shutdown_test() throws Exception {
-        Map<String, Object> channelOptions = new HashMap<>();
-        channelOptions.put("capacity", 1000);
-        channel = new InMemoryChannel<>(channelOptions);
-        sim = new SimulationEngine(channel, new EnvironmentProperties(new int[]{5, 5}, true), 
-             new ArrayList<>(), new ArrayList<>());
-
+        // This test can use the default engine from setUp
+        System.out.println("[Test] Starting simulation engine...");
         sim.start();
 
         // Shutdown immediately
+        System.out.println("[Test] Shutting down simulation engine...");
         sim.shutdown();
         
         // Wait for shutdown to complete
+        System.out.println("[Test] Waiting for shutdown to complete...");
         waitForShutdown(5000);
         
         assertThat(sim.isRunning()).isFalse();
+        System.out.println("[Test] Shutdown verified.");
     }
 }

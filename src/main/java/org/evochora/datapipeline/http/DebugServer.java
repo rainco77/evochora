@@ -5,6 +5,7 @@ import io.javalin.http.HttpStatus;
 import io.javalin.http.staticfiles.Location;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.evochora.datapipeline.IControllable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -17,7 +18,7 @@ import java.sql.ResultSet;
 /**
  * Lightweight web service serving static web renderer files and a simple API to fetch prepared ticks.
  */
-public final class DebugServer {
+public final class DebugServer implements IControllable {
     
 
     private static final Logger log = LoggerFactory.getLogger(DebugServer.class);
@@ -32,6 +33,15 @@ public final class DebugServer {
     private long lastStatusTime = 0;
     private double lastTPS = 0.0;
     private org.evochora.datapipeline.config.SimulationConfiguration.CompressionConfig compressionConfig;
+
+    @Override
+    public void start() {
+        // This version of start is for IControllable, but the primary start method
+        // requires parameters. ServiceManager calls the specific start method, so this can be a no-op.
+        if (!isRunning) {
+            log.warn("DebugServer.start() called without parameters. Use start(dbPath, port) instead.");
+        }
+    }
 
     public void start(String dbPath, int port) {
         start(dbPath, port, null);
@@ -133,7 +143,8 @@ public final class DebugServer {
         }
     }
 
-    public void stop() {
+    @Override
+    public void shutdown() {
         if (this.app != null) {
             try { 
                 this.app.stop(); 
@@ -149,6 +160,16 @@ public final class DebugServer {
         }
     }
     
+    @Override
+    public void pause() {
+        // No-op for the web server
+    }
+
+    @Override
+    public void resume() {
+        // No-op for the web server
+    }
+    
     public void forceStop() {
         if (this.app != null) {
             try { 
@@ -158,14 +179,26 @@ public final class DebugServer {
         }
     }
 
+    @Override
     public boolean isRunning() {
         return isRunning;
     }
     
+    @Override
+    public boolean isPaused() {
+        return false; // The web server does not have a paused state
+    }
+
+    @Override
     public boolean isAutoPaused() {
         return isAutoPaused;
     }
 
+    @Override
+    public void flush() {
+        // No-op for the web server
+    }
+    
     public int getPort() {
         return app != null ? app.port() : -1;
     }
@@ -181,27 +214,6 @@ public final class DebugServer {
                 String.format("port:%d reading %s", port, dbInfo));
     }
     
-    private double calculateTPS() {
-        long currentTime = System.currentTimeMillis();
-        
-        if (lastStatusTime == 0) {
-            lastStatusTime = currentTime;
-            return 0.0;
-        }
-        
-        long timeDiff = currentTime - lastStatusTime;
-        if (timeDiff > 0) {
-            lastTPS = 1000.0 / timeDiff; // Requests per second
-        }
-        
-        return lastTPS;
-    }
-    
-    private void resetTPS() {
-        lastStatusTime = 0;
-        lastTPS = 0.0;
-    }
-
     private byte[] gzipCompress(String data) throws java.io.IOException {
         try (java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
              java.util.zip.GZIPOutputStream gzipOut = new java.util.zip.GZIPOutputStream(baos)) {

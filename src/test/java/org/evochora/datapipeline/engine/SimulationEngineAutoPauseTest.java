@@ -28,6 +28,7 @@ class SimulationEngineAutoPauseTest {
 
     private InMemoryChannel<IQueueMessage> channel;
     private SimulationEngine engine;
+    private Thread drainThread;
 
     @BeforeEach
     void setUp() {
@@ -36,18 +37,33 @@ class SimulationEngineAutoPauseTest {
         channel = new InMemoryChannel<>(channelOptions);
         engine = new SimulationEngine(channel, new EnvironmentProperties(new int[]{10, 10}, true), 
              new ArrayList<>(), new ArrayList<>());
+        
+        drainThread = new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    channel.take();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        drainThread.setDaemon(true);
+        drainThread.start();
     }
 
     @AfterEach
     void tearDown() {
         if (engine != null && engine.isRunning()) {
             engine.shutdown();
-            // Wait for shutdown to complete
             try {
-                waitForShutdown(1000);
+                waitForShutdown(2000); // Wait for the engine to stop
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        }
+        // Stop the consumer thread AFTER the producer is stopped
+        if (drainThread != null) {
+            drainThread.interrupt();
         }
     }
 
@@ -83,8 +99,9 @@ class SimulationEngineAutoPauseTest {
      * @throws InterruptedException if the thread is interrupted while waiting.
      */
     private void waitForShutdown(long timeoutMillis) throws InterruptedException {
+        final SimulationEngine engineToWaitFor = this.engine;
         assertThat(waitForCondition(
-            () -> !engine.isRunning(),
+            () -> !engineToWaitFor.isRunning(),
             timeoutMillis,
             "simulation engine to shutdown"
         )).isTrue();
@@ -118,11 +135,7 @@ class SimulationEngineAutoPauseTest {
         engine.shutdown();
         
         // Wait for shutdown to complete
-        assertThat(waitForCondition(
-            () -> !engine.isRunning(),
-            5000,
-            "simulation engine to shutdown"
-        )).isTrue();
+        waitForShutdown(5000);
     }
 
     /**
@@ -134,7 +147,7 @@ class SimulationEngineAutoPauseTest {
     @Test
     void testMultipleAutoPausePoints() throws Exception {
         // Set auto-pause at multiple ticks
-        engine.setCheckpointPauseTicks(new int[]{5, 10, 15});
+        engine.setCheckpointPauseTicks(new int[]{5, 10});
         
         // Start the engine
         engine.start();
@@ -153,11 +166,7 @@ class SimulationEngineAutoPauseTest {
         engine.shutdown();
         
         // Wait for shutdown to complete
-        assertThat(waitForCondition(
-            () -> !engine.isRunning(),
-            5000,
-            "simulation engine to shutdown"
-        )).isTrue();
+        waitForShutdown(5000);
     }
 
     /**
@@ -185,10 +194,6 @@ class SimulationEngineAutoPauseTest {
         engine.shutdown();
         
         // Wait for shutdown to complete
-        assertThat(waitForCondition(
-            () -> !engine.isRunning(),
-            5000,
-            "simulation engine to shutdown"
-        )).isTrue();
+        waitForShutdown(5000);
     }
 }

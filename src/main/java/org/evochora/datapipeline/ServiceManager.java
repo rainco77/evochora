@@ -20,6 +20,8 @@ import java.util.Comparator;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.List;
+import java.util.ArrayList;
 
 /**
  * Centralized service manager for the Evochora pipeline.
@@ -81,75 +83,40 @@ public final class ServiceManager {
     public void startAll() {
         log.info("Starting all services...");
         
-        boolean allServicesStarted = true;
-        boolean anyServiceStarted = false;
+        // The startup order is critical to prevent deadlocks.
+        // 1. Start all "listening" services first.
+        startPersistence();
+        startIndexer();
+        startDebugServer();
         
-        // Start simulation first
-        if (!simulationRunning.get()) {
-            startSimulation();
-            log.info("Simulation service started");
-            anyServiceStarted = true;
-        } else {
-            log.info("Simulation service already running");
-        }
-        
-        // Wait a bit for simulation to initialize
-        try {
-            Thread.sleep(100);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        
-        // Start persistence service
-        if (!persistenceRunning.get()) {
-            startPersistence();
-            log.info("Persistence service started");
-            anyServiceStarted = true;
-        } else {
-            log.info("Persistence service already running");
-        }
-        
-        // Wait for persistence to create database
-        try {
-            Thread.sleep(1000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        
-        // Start indexer
-        if (!indexerRunning.get()) {
-            startIndexer();
-            log.info("Indexer service started");
-            anyServiceStarted = true;
-        } else {
-            log.info("Indexer service already running");
-        }
-        
-        // Start debug server
-        if (!serverRunning.get()) {
-            startDebugServer();
-            if (serverRunning.get()) {
-                log.info("Debug server started");
-                anyServiceStarted = true;
+        // 2. Wait for all listening services to be fully ready before starting the producer.
+        List<IControllable> listeners = new ArrayList<>();
+        if (persistenceService.get() != null) listeners.add(persistenceService.get());
+        if (indexer.get() != null) listeners.add(indexer.get());
+        if (debugServer.get() != null) listeners.add(debugServer.get());
+
+        long timeout = System.currentTimeMillis() + 5000; // 5-second timeout for readiness
+        for (IControllable service : listeners) {
+            while (!service.isReady() && System.currentTimeMillis() < timeout) {
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.warn("Interrupted while waiting for {} to become ready.", service.getClass().getSimpleName());
+                    return;
+                }
             }
-        } else {
-            log.info("Debug server already running");
-        }
-        
-        // Check if debug server actually started
-        if (!serverRunning.get()) {
-            allServicesStarted = false;
-        }
-        
-        if (allServicesStarted) {
-            if (anyServiceStarted) {
-                log.info("All services started successfully");
-            } else {
-                log.info("All services already running");
+            if (!service.isReady()) {
+                log.error("{} did not become ready within the timeout.", service.getClass().getSimpleName());
+                // Depending on the desired behavior, we might want to stop other services here.
+                return;
             }
-        } else {
-            log.warn("Some services failed to start. Check logs for details.");
         }
+
+        // 3. Now that all listeners are confirmed to be ready, start the "speaking" service.
+        startSimulation();
+        
+        log.info("All services have been instructed to start.");
     }
     
     /**
@@ -228,7 +195,7 @@ public final class ServiceManager {
         }
         
         if (debugServer.get() != null && serverRunning.get()) {
-            debugServer.get().stop();
+            debugServer.get().shutdown();
             serverRunning.set(false);
             log.info("Debug server stopped");
             anyServicePaused = true;
@@ -273,7 +240,7 @@ public final class ServiceManager {
             case "server":
             case "web":
                 if (debugServer.get() != null && serverRunning.get()) {
-                    debugServer.get().stop();
+                    debugServer.get().shutdown();
                     serverRunning.set(false);
                     log.info("Debug server stopped");
                 }
@@ -405,24 +372,36 @@ public final class ServiceManager {
     public void stopAll() {
         log.info("Stopping all services...");
         
-        if (simulationEngine.get() != null) {
-            simulationEngine.get().shutdown();
-            simulationRunning.set(false);
+        // Use a list to manage services for cleaner shutdown logic
+        List<IControllable> services = new ArrayList<>();
+        if (simulationEngine.get() != null) services.add(simulationEngine.get());
+        if (persistenceService.get() != null) services.add(persistenceService.get());
+        if (indexer.get() != null) services.add(indexer.get());
+        if (debugServer.get() != null) services.add(debugServer.get());
+
+        // Initiate shutdown for all services in parallel
+        for (IControllable service : services) {
+            try {
+                service.shutdown();
+            } catch (Exception e) {
+                log.warn("Error initiating shutdown for {}: {}", service.getClass().getSimpleName(), e.getMessage());
+            }
         }
-        
-        if (persistenceService.get() != null) {
-            persistenceService.get().shutdown();
-            persistenceRunning.set(false);
-        }
-        
-        if (indexer.get() != null) {
-            indexer.get().shutdown();
-            indexerRunning.set(false);
-        }
-        
-        if (debugServer.get() != null) {
-            debugServer.get().stop();
-            serverRunning.set(false);
+
+        // Wait for all services to terminate gracefully
+        long shutdownTimeout = System.currentTimeMillis() + 5000; // 5-second timeout
+        for (IControllable service : services) {
+            while (service.isRunning() && System.currentTimeMillis() < shutdownTimeout) {
+                try {
+                    Thread.sleep(50); // Poll every 50ms
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            if (service.isRunning()) {
+                log.warn("{} did not shut down gracefully within the timeout.", service.getClass().getSimpleName());
+            }
         }
         
         log.info("All services stopped");
@@ -559,14 +538,22 @@ public final class ServiceManager {
         if (persistenceService.get() == null || !persistenceRunning.get()) {
             EnvironmentProperties envProps = new EnvironmentProperties(config.simulation.environment.shape, config.simulation.environment.toroidal);
             
-            // Create an InMemoryChannel that WRAPS the existing queue
-            // This is a temporary bridge to connect the old world (queue) with the new (channel)
+            // Get the input channel for the PersistenceService
             @SuppressWarnings("unchecked")
-            IInputChannel<IQueueMessage> channel = channelFactory.<IInputChannel<IQueueMessage>>getOrCreateChannel(config.pipeline.persistence.inputChannel)
+            IInputChannel<IQueueMessage> inputChannel = channelFactory.<IInputChannel<IQueueMessage>>getOrCreateChannel(config.pipeline.persistence.inputChannel)
                 .map(c -> (IInputChannel<IQueueMessage>) c)
-                .orElseThrow(() -> new IllegalStateException("Failed to create or get channel: " + config.pipeline.persistence.inputChannel));
+                .orElseThrow(() -> new IllegalStateException("Failed to create or get input channel: " + config.pipeline.persistence.inputChannel));
             
-            PersistenceService service = new PersistenceService(channel, envProps, config.pipeline.persistence);
+            PersistenceService service = new PersistenceService(inputChannel, envProps, config.pipeline.persistence);
+
+            // Get and inject the output channel if configured
+            if (config.pipeline.persistence.outputChannel != null) {
+                @SuppressWarnings("unchecked")
+                IOutputChannel<IQueueMessage> outputChannel = channelFactory.<IOutputChannel<IQueueMessage>>getOrCreateChannel(config.pipeline.persistence.outputChannel)
+                    .map(c -> (IOutputChannel<IQueueMessage>) c)
+                    .orElseThrow(() -> new IllegalStateException("Failed to create or get output channel: " + config.pipeline.persistence.outputChannel));
+                service.setOutputChannel(outputChannel);
+            }
             
             persistenceService.set(service);
             service.start();
@@ -578,22 +565,42 @@ public final class ServiceManager {
     
     private void startIndexer() {
         if (indexer.get() == null || !indexerRunning.get()) {
-            if (persistenceService.get() != null) {
-                String rawDbUrl = persistenceService.get().getJdbcUrl();
-                // Generate unique URLs for indexer to avoid shared cache conflicts
-                String indexerRawDbUrl = rawDbUrl.replace("memdb_", "memdb_indexer_");
-                String indexerDebugDbUrl = indexerRawDbUrl.replace("_raw", "_debug");
-                // DebugIndexer lädt EnvironmentProperties aus der Datenbank
-                DebugIndexer service = new DebugIndexer(indexerRawDbUrl, indexerDebugDbUrl, config.pipeline.indexer);
-                
-                indexer.set(service);
-                service.start();
-                indexerRunning.set(true);
-                log.info("Indexer started: reading {}, writing {}", 
-                    indexerRawDbUrl, indexerDebugDbUrl);
-            } else {
-                log.warn("Cannot start indexer: persistence service not running");
+            DebugIndexer service;
+            String inputSource = config.pipeline.indexer.inputSource;
+            String debugDbUrl = config.pipeline.indexer.outputPath; // Always use the configured output path.
+
+            if (debugDbUrl == null) {
+                log.error("Cannot start indexer: outputPath is not configured in pipeline.indexer settings.");
+                return;
             }
+
+            if ("channel".equalsIgnoreCase(inputSource)) {
+                // New path: Create indexer with its own debug DB path. The raw DB path is irrelevant.
+                service = new DebugIndexer(null, debugDbUrl, config.pipeline.indexer);
+                
+                @SuppressWarnings("unchecked")
+                IInputChannel<IQueueMessage> channel = channelFactory.<IInputChannel<IQueueMessage>>getOrCreateChannel(config.pipeline.indexer.inputChannel)
+                    .map(c -> (IInputChannel<IQueueMessage>) c)
+                    .orElseThrow(() -> new IllegalStateException("Failed to create or get input channel for indexer: " + config.pipeline.indexer.inputChannel));
+                service.setInputChannel(channel);
+                
+                log.info("Indexer started in CHANNEL mode, writing to '{}'", debugDbUrl);
+
+            } else {
+                // Legacy path: Couple to the PersistenceService's database.
+                if (persistenceService.get() != null && persistenceService.get().getJdbcUrl() != null) {
+                    String rawDbUrl = persistenceService.get().getJdbcUrl();
+                    service = new DebugIndexer(rawDbUrl, debugDbUrl, config.pipeline.indexer);
+                    log.info("Indexer started in SQLITE mode, reading from '{}', writing to '{}'", rawDbUrl, debugDbUrl);
+                } else {
+                    log.warn("Cannot start indexer in SQLITE mode: persistence service not running or has no DB URL.");
+                    return;
+                }
+            }
+            
+            indexer.set(service);
+            service.start();
+            indexerRunning.set(true);
         }
     }
     

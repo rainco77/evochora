@@ -192,6 +192,12 @@
           // The maximum number of messages the channel can hold before blocking.
           "capacity": 10000
         }
+      },
+      "persist-to-indexer": {
+        "className": "org.evochora.datapipeline.channel.inmemory.InMemoryChannel",
+        "options": {
+          "capacity": 10000
+        }
       }
     },
     // [OPTIONAL] Simulation pipeline configuration (default: autoStart=true, outputPath="runs/")
@@ -216,6 +222,7 @@
       "outputPath": "runs/",
       // The name of the channel from which the persistence service will receive its data.
       "inputChannel": "simulation-to-persistence",
+      "outputChannel": "persist-to-indexer",
       // [OPTIONAL] Database performance optimizations
       "database": {
         // [OPTIONAL] SQLite cache size in pages (default: 5000)
@@ -237,6 +244,8 @@
       // [OPTIONAL] Whether to automatically start indexer when pipeline starts (default: true)
       "autoStart": true,
       // [OPTIONAL] Directory path to monitor for new simulation runs (default: "runs/")
+      "inputChannel": "persist-to-indexer",
+      "inputSource": "channel",
       "inputPath": "runs/",
       // [OPTIONAL] Compression configuration for prepared tick data
       "compression": {

@@ -19,6 +19,17 @@ public interface IControllable {
      * can be a no-op.
      */
     void flush();
+    
+    /**
+     * Indicates whether the service is fully initialized and ready to process data.
+     * For most services, this is equivalent to isRunning(), but for services that
+     * need to perform initial setup, this can be overridden to provide a more
+     * accurate readiness check.
+     * @return true if the service is ready, false otherwise.
+     */
+    default boolean isReady() {
+        return isRunning();
+    }
 }
 
 

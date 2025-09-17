@@ -13,6 +13,7 @@ import java.sql.PreparedStatement;
 import java.sql.Statement;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Contains integration tests for the {@link DebugServer}.
@@ -64,6 +65,7 @@ public class DebugServerTest {
         
         // Create the table and keep connection open to maintain table existence
         Connection dbConnection = DriverManager.getConnection(dbPath);
+        DebugServer web = new DebugServer();
         try {
             try (Statement st = dbConnection.createStatement()) {
                 st.execute("DROP TABLE IF EXISTS prepared_ticks");
@@ -78,24 +80,25 @@ public class DebugServerTest {
             }
             
             // Test der Web-Service-Funktionalität
-            DebugServer web = new DebugServer();
-            web.start(dbPath, 0);
-            try {
-                // Wait for the server to start
-                waitForServerStart(web, 5000);
-                
-                // HTTP-Test
-                HttpClient client = HttpClient.newHttpClient();
-                HttpRequest req = HttpRequest.newBuilder(URI.create("http://localhost:" + web.getPort() + "/api/tick/1")).GET().build();
-                HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
-                assertThat(resp.statusCode()).isEqualTo(200);
-                assertThat(resp.body()).contains("\"tickNumber\":1");
-            } finally {
-                web.stop();
-                // Wait for the server to stop
-                waitForServerStop(web, 5000);
-            }
+            web.start(dbPath, 0); // Port 0 for automatic port selection
+            assertTrue(web.isRunning());
+            assertTrue(web.getPort() > 0);
+            
+            // Wait for the server to start
+            waitForServerStart(web, 5000);
+            
+            // HTTP-Test
+            HttpClient client = HttpClient.newHttpClient();
+            HttpRequest req = HttpRequest.newBuilder(URI.create("http://localhost:" + web.getPort() + "/api/tick/1")).GET().build();
+            HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+            assertThat(resp.statusCode()).isEqualTo(200);
+            assertThat(resp.body()).contains("\"tickNumber\":1");
         } finally {
+            if (web != null) {
+                web.shutdown();
+            }
+            // Wait for the server to stop
+            waitForServerStop(web, 5000);
             // Close the database connection after the test
             dbConnection.close();
         }
