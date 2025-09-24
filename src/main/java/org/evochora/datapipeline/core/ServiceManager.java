@@ -3,10 +3,11 @@ package org.evochora.datapipeline.core;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import com.typesafe.config.ConfigValueType;
-import org.evochora.datapipeline.api.channels.IInputChannel;
-import org.evochora.datapipeline.api.channels.IOutputChannel;
-import org.evochora.datapipeline.api.services.ChannelMetrics;
+import org.evochora.datapipeline.api.resources.IContextualResource;
+import org.evochora.datapipeline.api.resources.IMonitorableResource;
+import org.evochora.datapipeline.api.resources.ResourceContext;
 import org.evochora.datapipeline.api.services.IService;
+import org.evochora.datapipeline.api.services.ResourceMetrics;
 import org.evochora.datapipeline.api.services.ServiceStatus;
 import org.evochora.datapipeline.api.services.State;
 import org.slf4j.Logger;
@@ -24,8 +25,9 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * The central orchestrator for the data pipeline. It is responsible for building the
- * entire pipeline from a configuration object and managing the lifecycle of all services.
+ * The central orchestrator for the data pipeline implementing Universal Dependency Injection.
+ * It is responsible for building the entire pipeline from a configuration object and managing 
+ * the lifecycle of all services using the resource-based injection pattern.
  */
 public class ServiceManager {
 
@@ -33,8 +35,8 @@ public class ServiceManager {
     private final Map<String, Object> resources = new HashMap<>();
     private final Map<String, IService> services = new HashMap<>();
     private final Map<String, Thread> serviceThreads = new HashMap<>();
-    private final List<AbstractChannelBinding<?>> channelBindings = new ArrayList<>();
-    private final Map<String, ChannelMetrics> channelMetrics = new ConcurrentHashMap<>();
+    private final List<AbstractResourceBinding<?>> resourceBindings = new ArrayList<>();
+    private final Map<String, ResourceMetrics> resourceMetrics = new ConcurrentHashMap<>();
     private ScheduledExecutorService metricsExecutor;
     private volatile boolean stopped = false;
     private volatile boolean servicesStarted = false;
@@ -49,24 +51,24 @@ public class ServiceManager {
      * @param rootConfig The root configuration object for the pipeline.
      */
     public ServiceManager(Config rootConfig) {
-        log.info("Initializing ServiceManager...");
+        log.info("Initializing ServiceManager with Universal DI...");
         applyLoggingConfiguration(rootConfig);
-        
+
         Config pipelineConfig = rootConfig.getConfig("pipeline");
         this.autoStart = pipelineConfig.hasPath("autoStart") && pipelineConfig.getBoolean("autoStart");
         this.startupSequence = pipelineConfig.hasPath("startupSequence")
                 ? pipelineConfig.getStringList("startupSequence")
                 : new ArrayList<>();
-        
+
         Config metricsConfig = pipelineConfig.hasPath("metrics") ? pipelineConfig.getConfig("metrics") : ConfigFactory.empty();
         this.enableMetrics = metricsConfig.hasPath("enableMetrics") && metricsConfig.getBoolean("enableMetrics");
         this.updateIntervalSeconds = metricsConfig.hasPath("updateIntervalSeconds") ? metricsConfig.getInt("updateIntervalSeconds") : 1;
 
         buildPipeline(pipelineConfig);
-        
+
         log.debug("ServiceManager initialized with {} resources and {} services (autoStart: {}, startupSequence: {}, enableMetrics: {})",
                 resources.size(), services.size(), autoStart, startupSequence, enableMetrics);
-        
+
         if (autoStart) {
             log.info("Auto-starting services in sequence: {}", startupSequence);
             startAll();
@@ -74,7 +76,7 @@ public class ServiceManager {
     }
 
     private void buildPipeline(Config pipelineConfig) {
-        // 1. Instantiate all resources
+        // 1. Instantiate all resources from central resources block
         if (pipelineConfig.hasPath("resources")) {
             Config resourcesConfig = pipelineConfig.getConfig("resources");
             for (String resourceName : resourcesConfig.root().keySet()) {
@@ -101,7 +103,7 @@ public class ServiceManager {
         }
         log.info("Instantiated {} resources.", resources.size());
 
-        // 2. Instantiate all services
+        // 2. Instantiate all services with Universal DI
         if (pipelineConfig.hasPath("services")) {
             Config servicesConfig = pipelineConfig.getConfig("services");
             for (String serviceName : servicesConfig.root().keySet()) {
@@ -110,19 +112,20 @@ public class ServiceManager {
                     String className = serviceDefinition.getString("className");
                     Config options = serviceDefinition.hasPath("options") ? serviceDefinition.getConfig("options") : ConfigFactory.empty();
 
-                    // Resolve dependencies for this service
+                    // Resolve dependencies using Universal DI pattern
                     Map<String, List<Object>> serviceResources = new HashMap<>();
                     if (serviceDefinition.hasPath("resources")) {
                         Config serviceResourcesConfig = serviceDefinition.getConfig("resources");
                         for (String portName : serviceResourcesConfig.root().keySet()) {
-                            List<String> resourceNames = getResourceNames(serviceResourcesConfig, portName);
+                            List<String> resourceURIs = getResourceURIs(serviceResourcesConfig, portName);
                             List<Object> resolvedResources = new ArrayList<>();
-                            for (String resourceName : resourceNames) {
-                                Object resource = resources.get(resourceName);
-                                if (resource != null) {
-                                    resolvedResources.add(resource);
+
+                            for (String resourceURI : resourceURIs) {
+                                Object injectedObject = resolveResourceURI(resourceURI, serviceName, portName);
+                                if (injectedObject != null) {
+                                    resolvedResources.add(injectedObject);
                                 } else {
-                                    log.error("Service '{}' references unknown resource '{}' for port '{}'", serviceName, resourceName, portName);
+                                    log.error("Service '{}' references unknown resource URI '{}' for port '{}'", serviceName, resourceURI, portName);
                                 }
                             }
                             serviceResources.put(portName, resolvedResources);
@@ -135,31 +138,54 @@ public class ServiceManager {
                     services.put(serviceName, service);
                     log.debug("Instantiated service '{}' of type {}", serviceName, className);
 
-                    // Create metric bindings for channels
-                    serviceResources.forEach((portName, resolved) -> {
-                        resolved.forEach(resource -> {
-                            if (resource instanceof IInputChannel) {
-                                InputChannelBinding<?> binding = new InputChannelBinding<>(serviceName, portName, resource.toString(), (IInputChannel<?>) resource);
-                                channelBindings.add(binding);
-                            } else if (resource instanceof IOutputChannel) {
-                                OutputChannelBinding<?> binding = new OutputChannelBinding<>(serviceName, portName, resource.toString(), (IOutputChannel<?>) resource);
-                                channelBindings.add(binding);
-                            }
-                        });
-                    });
-
                 } catch (Exception e) {
                     log.error("Failed to instantiate service '{}': {}", serviceName, e.getMessage(), e);
                 }
             }
         }
         log.info("Instantiated {} services.", services.size());
-        
+
         // 3. Start metrics collection
-        startMetricsCollection(pipelineConfig);
+        startMetricsCollection();
     }
 
-    private List<String> getResourceNames(Config config, String key) {
+    /**
+     * Resolves a resource URI in the format [usageType:]resourceName and returns the injected object.
+     */
+    private Object resolveResourceURI(String resourceURI, String serviceName, String portName) {
+        String usageType = "default";
+        String resourceName = resourceURI;
+
+        // Parse URI format [usageType:]resourceName
+        if (resourceURI.contains(":")) {
+            String[] parts = resourceURI.split(":", 2);
+            usageType = parts[0];
+            resourceName = parts[1];
+        }
+
+        Object resource = resources.get(resourceName);
+        if (resource == null) {
+            return null;
+        }
+
+        // Check if resource implements IContextualResource
+        if (resource instanceof IContextualResource) {
+            ResourceContext context = new ResourceContext(serviceName, portName, usageType, this);
+            Object injectedObject = ((IContextualResource) resource).getInjectedObject(context);
+
+            // If the injected object is a resource binding, track it for metrics
+            if (injectedObject instanceof AbstractResourceBinding<?>) {
+                resourceBindings.add((AbstractResourceBinding<?>) injectedObject);
+            }
+
+            return injectedObject;
+        } else {
+            // Return resource directly
+            return resource;
+        }
+    }
+
+    private List<String> getResourceURIs(Config config, String key) {
         if (config.getValue(key).valueType() == ConfigValueType.STRING) {
             return Collections.singletonList(config.getString(key));
         } else {
@@ -201,39 +227,39 @@ public class ServiceManager {
             log.warn("Failed to apply logging configuration from HOCON config", e);
         }
     }
-    
-    private void startMetricsCollection(Config pipelineConfig) {
+
+    private void startMetricsCollection() {
         if (!enableMetrics) {
             log.debug("Metrics collection disabled by configuration");
             return;
         }
-        
+
         metricsExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "metrics-collector");
             t.setDaemon(true);
             return t;
         });
-        
+
         metricsExecutor.scheduleAtFixedRate(this::collectMetrics, updateIntervalSeconds, updateIntervalSeconds, TimeUnit.SECONDS);
         log.debug("Started metrics collection with {} second interval", updateIntervalSeconds);
     }
-    
-    private void resetChannelBindingErrorCounts() {
-        for (AbstractChannelBinding<?> binding : channelBindings) {
+
+    private void resetResourceBindingErrorCounts() {
+        for (AbstractResourceBinding<?> binding : resourceBindings) {
             binding.resetErrorCount();
         }
-        log.debug("Reset error counts for {} channel bindings", channelBindings.size());
+        log.debug("Reset error counts for {} resource bindings", resourceBindings.size());
     }
 
     private void collectMetrics() {
-        for (AbstractChannelBinding<?> binding : channelBindings) {
+        for (AbstractResourceBinding<?> binding : resourceBindings) {
             try {
                 long messageCount = binding.getAndResetCount();
                 long errorCount = binding.getErrorCount();
                 double messagesPerSecond = (double) messageCount / updateIntervalSeconds;
-                
-                String key = String.format("%s:%s:%s", binding.getServiceName(), binding.getChannelName(), binding.getDirection());
-                channelMetrics.put(key, ChannelMetrics.withCurrentTimestamp(messagesPerSecond, (int) errorCount));
+
+                String key = String.format("%s:%s:%s:%s", binding.getServiceName(), binding.getPortName(), binding.getResourceName(), binding.getUsageType());
+                resourceMetrics.put(key, ResourceMetrics.withCurrentTimestamp(messagesPerSecond, (int) errorCount));
             } catch (Exception e) {
                 log.warn("Failed to collect metrics for binding {}: {}", binding, e.getMessage(), e);
             }
@@ -245,27 +271,27 @@ public class ServiceManager {
             log.debug("Services already started, skipping duplicate startAll() call");
             return;
         }
-        
+
         log.debug("Starting services...");
-        resetChannelBindingErrorCounts();
+        resetResourceBindingErrorCounts();
         servicesStarted = true;
-        
+
         List<String> servicesToStart = startupSequence.isEmpty() ? new ArrayList<>(services.keySet()) : startupSequence;
-        
+
         for (String serviceName : servicesToStart) {
             IService service = services.get(serviceName);
             if (service == null) {
                 log.warn("Service in startup sequence '{}' not configured", serviceName);
                 continue;
             }
-            
+
             if (service.getServiceStatus().state() == State.STOPPED) {
                 log.debug("Starting service: {}", serviceName);
                 Thread thread = new Thread(service::start);
                 thread.setName(serviceName);
                 serviceThreads.put(serviceName, thread);
                 thread.start();
-                
+
                 if (!startupSequence.isEmpty()) {
                     waitForServiceToStart(serviceName, service);
                 }
@@ -279,7 +305,7 @@ public class ServiceManager {
     private void waitForServiceToStart(String serviceName, IService service) {
         long startTime = System.currentTimeMillis();
         long timeoutMs = 10000; // 10 second timeout
-        
+
         while (service.getServiceStatus().state() == State.STOPPED) {
             if (System.currentTimeMillis() - startTime > timeoutMs) {
                 log.warn("Timeout waiting for service '{}' to start after {}ms", serviceName, timeoutMs);
@@ -293,7 +319,7 @@ public class ServiceManager {
                 break;
             }
         }
-        
+
         if (service.getServiceStatus().state() != State.STOPPED) {
             log.debug("Service '{}' started successfully", serviceName);
         }
@@ -301,10 +327,10 @@ public class ServiceManager {
 
     public void stopAll() {
         if (stopped) return;
-        
+
         log.info("Stopping all services...");
         services.values().forEach(IService::stop);
-        
+
         boolean allStopped = true;
         for (Thread thread : serviceThreads.values()) {
             try {
@@ -318,10 +344,10 @@ public class ServiceManager {
                 allStopped = false;
             }
         }
-        
+
         serviceThreads.clear();
         stopped = true;
-        
+
         if (metricsExecutor != null) {
             metricsExecutor.shutdown();
             try {
@@ -333,7 +359,7 @@ public class ServiceManager {
                 Thread.currentThread().interrupt();
             }
         }
-        
+
         log.info(allStopped ? "All services stopped" : "Some services may still be running");
     }
 
@@ -374,41 +400,49 @@ public class ServiceManager {
     public String getStatus() {
         StringBuilder sb = new StringBuilder();
         sb.append("========================================================================================\n");
-        sb.append(String.format("%-20s | %-7s | %-4s | %-11s | %s%n", "SERVICE / CHANNEL", "STATE", "I/O", "QUEUE", "ACTIVITY"));
+        sb.append(String.format("%-20s | %-7s | %-12s | %-11s | %s%n", "SERVICE / RESOURCE", "STATE", "USAGE", "QUEUE", "ACTIVITY"));
         sb.append("========================================================================================\n");
-        
+
         services.forEach((serviceName, service) -> {
             ServiceStatus status = service.getServiceStatus();
-            sb.append(String.format("%-20s | %-7s | %-4s | %-11s | %s%n", serviceName, status.state(), "", "", service.getActivityInfo()));
-            
-            status.channelBindings().forEach(binding -> {
+            sb.append(String.format("%-20s | %-7s | %-12s | %-11s | %s%n", serviceName, status.state(), "", "", service.getActivityInfo()));
+
+            status.resourceBindings().forEach(binding -> {
                 String prefix = "└─ ";
-                String channelInfo = prefix + binding.channelName();
-                String queueInfo = getQueueInfo(binding.channelName());
+                String resourceInfo = prefix + binding.resourceName();
+                String queueInfo = getQueueInfo(binding.resourceName());
                 String activityInfo = "disabled";
                 if (enableMetrics) {
-                    String metricsKey = String.format("%s:%s:%s", serviceName, binding.channelName(), binding.direction());
-                    ChannelMetrics metrics = channelMetrics.get(metricsKey);
-                    if (metrics != null) {
-                        activityInfo = String.format("(%.1f/s, %d errors)", metrics.messagesPerSecond(), metrics.errorCount());
+                    // Search for matching metrics by checking all stored keys
+                    ResourceMetrics matchingMetrics = null;
+                    for (Map.Entry<String, ResourceMetrics> entry : resourceMetrics.entrySet()) {
+                        String key = entry.getKey();
+                        if (key.contains(serviceName) && key.contains(binding.resourceName()) && key.contains(binding.usageType())) {
+                            matchingMetrics = entry.getValue();
+                            break;
+                        }
+                    }
+
+                    if (matchingMetrics != null) {
+                        activityInfo = String.format("(%.1f/s, %d errors)", matchingMetrics.messagesPerSecond(), matchingMetrics.errorCount());
                     } else {
                         activityInfo = "(0.0/s)";
                     }
                 }
-                sb.append(String.format("%-20s | %-7s | %-4s | %-11s | %s%n", channelInfo, binding.state(), binding.direction(), queueInfo, activityInfo));
+                sb.append(String.format("%-20s | %-7s | %-12s | %-11s | %s%n", resourceInfo, binding.state(), binding.usageType(), queueInfo, activityInfo));
             });
             sb.append("---------------------------------------------------------------------------------------\n");
         });
-        
+
         sb.append("========================================================================================\n");
         return sb.toString();
     }
-    
-    private String getQueueInfo(String channelName) {
-        Object resource = resources.get(channelName);
-        if (resource instanceof org.evochora.datapipeline.api.channels.IMonitorableChannel) {
-            org.evochora.datapipeline.api.channels.IMonitorableChannel mc = (org.evochora.datapipeline.api.channels.IMonitorableChannel) resource;
-            return String.format("%d / %d", mc.getBacklogSize(), mc.getCapacity());
+
+    private String getQueueInfo(String resourceName) {
+        Object resource = resources.get(resourceName);
+        if (resource instanceof IMonitorableResource) {
+            IMonitorableResource mr = (IMonitorableResource) resource;
+            return String.format("%d / %d", mr.getBacklogSize(), mr.getCapacity());
         }
         return "N/A";
     }

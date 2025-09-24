@@ -4,7 +4,7 @@ import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import org.evochora.datapipeline.api.services.IService;
 import org.evochora.datapipeline.api.services.State;
-import org.evochora.datapipeline.channels.InMemoryChannel;
+import org.evochora.datapipeline.resources.InMemoryChannel;
 import org.evochora.datapipeline.services.DummyConsumerService;
 import org.evochora.datapipeline.services.DummyProducerService;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,13 +22,13 @@ public class ServiceManagerTest {
     void setUp() {
         // Set logger levels to WARN for services - only WARN and ERROR should be shown
         System.setProperty("org.evochora.datapipeline.core.ServiceManager", "WARN");
-        
+
         // Create test configuration inline - no external dependencies
         String testConfig = """
             pipeline {
                 resources {
                     test-stream {
-                        className = "org.evochora.datapipeline.channels.InMemoryChannel"
+                        className = "org.evochora.datapipeline.resources.InMemoryChannel"
                         options {
                             capacity = 100
                         }
@@ -38,7 +38,7 @@ public class ServiceManagerTest {
                     test-producer {
                         className = "org.evochora.datapipeline.services.DummyProducerService"
                         resources {
-                            messages = "test-stream"
+                            messages = "channel-out:test-stream"
                         }
                         options {
                             messageCount = 10
@@ -47,6 +47,7 @@ public class ServiceManagerTest {
                     test-consumer {
                         className = "org.evochora.datapipeline.services.DummyConsumerService"
                         resources {
+                            messages = "channel-in:test-stream"
                             messages = "test-stream"
                         }
                     }
@@ -270,7 +271,7 @@ public class ServiceManagerTest {
                     test-consumer {
                         className = "org.evochora.datapipeline.services.DummyConsumerService"
                         resources {
-                            messages = "test-stream"
+                                                messages = "channel-in:test-stream"
                         }
                     }
                 }

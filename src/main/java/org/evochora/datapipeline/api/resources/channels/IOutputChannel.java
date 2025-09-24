@@ -1,4 +1,4 @@
-package org.evochora.datapipeline.api.channels;
+package org.evochora.datapipeline.api.resources.channels;
 
 /**
  * Defines the contract for a component to which messages can be written.

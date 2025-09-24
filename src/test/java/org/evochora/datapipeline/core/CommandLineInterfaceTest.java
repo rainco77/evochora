@@ -1,5 +1,6 @@
 package org.evochora.datapipeline.core;
-
+// This patch will be applied if the file exists. 
+// If it doesn't exist, this patch will be skipped silently.
 import com.typesafe.config.Config;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

@@ -5,7 +5,7 @@ import com.typesafe.config.ConfigFactory;
 import org.evochora.compiler.api.PlacedMolecule;
 import org.evochora.compiler.api.ProgramArtifact;
 import org.evochora.compiler.api.SourceInfo;
-import org.evochora.datapipeline.api.channels.IOutputChannel;
+import org.evochora.datapipeline.api.resources.channels.IOutputChannel;
 import org.evochora.datapipeline.api.contracts.EnvironmentProperties;
 import org.evochora.datapipeline.api.contracts.RawTickData;
 import org.evochora.datapipeline.api.contracts.SimulationContext;

@@ -2,9 +2,11 @@ package org.evochora.datapipeline.services;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
-import org.evochora.datapipeline.api.channels.IOutputChannel;
+import org.evochora.datapipeline.api.resources.channels.IOutputChannel;
 import org.evochora.datapipeline.api.contracts.RawTickData;
 import org.evochora.datapipeline.api.contracts.SimulationContext;
+import org.evochora.datapipeline.api.resources.IContextualResource;
+import org.evochora.datapipeline.api.resources.ResourceContext;
 import org.evochora.datapipeline.api.services.ServiceStatus;
 import org.evochora.datapipeline.api.services.State;
 import org.evochora.datapipeline.core.ServiceManager;
@@ -23,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * Comprehensive tests for the SimulationEngine service.
  * Tests service lifecycle, configuration parsing, message publishing, and error handling.
+ * Updated for Universal DI pattern.
  */
 @Tag("unit")
 public class SimulationEngineTest {
@@ -34,35 +37,33 @@ public class SimulationEngineTest {
     private TestOutputChannel<RawTickData> tickDataChannel;
 
     private void setupEngineWithConfig(Config config) {
-        // Create a ServiceManager with a config that uses our test channels
-        String resourcesConfigStr = """
-            resources {
-                "context-channel" {
-                    className = "org.evochora.datapipeline.services.SimulationEngineTest$TestOutputChannel"
-                    options {}
-                }
-                "raw-tick-channel" {
-                    className = "org.evochora.datapipeline.services.SimulationEngineTest$TestOutputChannel"
-                    options {}
-                }
-            }
-            """;
-        String servicesConfigStr = """
-            services {
-                "test-engine" {
-                    className = "org.evochora.datapipeline.services.SimulationEngine"
-                    resources {
-                        contextData = "context-channel"
-                        tickData = "raw-tick-channel"
+        // Create a ServiceManager with a config that uses our test channels for Universal DI
+        String pipelineConfigStr = """
+            pipeline {
+                resources {
+                    "context-channel" {
+                        className = "org.evochora.datapipeline.services.SimulationEngineTest$TestOutputChannel"
+                        options {}
                     }
-                    options = %s
+                    "raw-tick-channel" {
+                        className = "org.evochora.datapipeline.services.SimulationEngineTest$TestOutputChannel"  
+                        options {}
+                    }
+                }
+                services {
+                    "test-engine" {
+                        className = "org.evochora.datapipeline.services.SimulationEngine"
+                        resources {
+                            contextData = "channel-out:context-channel"
+                            tickData = "channel-out:raw-tick-channel"
+                        }
+                        options = %s
+                    }
                 }
             }
             """.formatted(config.root().render());
 
-        Config pipelineConfig = ConfigFactory.parseString(resourcesConfigStr)
-                .withFallback(ConfigFactory.parseString(servicesConfigStr));
-        Config fullConfig = ConfigFactory.empty().withValue("pipeline", pipelineConfig.root());
+        Config fullConfig = ConfigFactory.parseString(pipelineConfigStr);
 
         serviceManager = new ServiceManager(fullConfig);
 
@@ -290,21 +291,34 @@ public class SimulationEngineTest {
 
     /**
      * Test output channel implementation for capturing messages during tests.
+     * Updated to support Universal DI pattern as a contextual resource.
      */
-    public static class TestOutputChannel<T> implements IOutputChannel<T> {
+    public static class TestOutputChannel<T> implements IOutputChannel<T>, IContextualResource {
         private final BlockingQueue<T> messages = new ArrayBlockingQueue<>(1000);
-        
+
+        public TestOutputChannel() {}
+
+        public TestOutputChannel(Config options) {
+            // Constructor with Config for Universal DI instantiation
+        }
+
         @Override
         public void write(T message) throws InterruptedException {
             messages.put(message);
         }
-        
+
         public T readMessage(long timeoutMs) throws InterruptedException {
             return messages.poll(timeoutMs, TimeUnit.MILLISECONDS);
         }
-        
+
         public int getMessageCount() {
             return messages.size();
+        }
+
+        @Override
+        public Object getInjectedObject(ResourceContext context) {
+            // For testing, return this channel directly regardless of usage type
+            return this;
         }
     }
 }

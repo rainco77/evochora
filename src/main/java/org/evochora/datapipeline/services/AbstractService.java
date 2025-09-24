@@ -1,10 +1,11 @@
 package org.evochora.datapipeline.services;
 
 import com.typesafe.config.Config;
-import org.evochora.datapipeline.api.channels.IInputChannel;
-import org.evochora.datapipeline.api.channels.IMonitorableChannel;
-import org.evochora.datapipeline.api.channels.IOutputChannel;
+import org.evochora.datapipeline.api.resources.channels.IInputChannel;
+import org.evochora.datapipeline.api.resources.channels.IOutputChannel;
+import org.evochora.datapipeline.api.resources.IMonitorableResource;
 import org.evochora.datapipeline.api.services.*;
+import org.evochora.datapipeline.core.AbstractResourceBinding;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,9 +17,10 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 /**
- * An abstract base class for services, providing common lifecycle management and channel wiring.
+ * An abstract base class for services, providing common lifecycle management and resource binding.
  * This class handles the state transitions (RUNNING, PAUSED, STOPPED) and provides
  * a thread-safe mechanism for pausing and resuming the service's execution.
+ * Updated for Universal DI with resource-based injection pattern.
  */
 public abstract class AbstractService implements IService {
 
@@ -31,7 +33,7 @@ public abstract class AbstractService implements IService {
     protected final Map<String, List<Object>> resources;
 
     /**
-     * Constructs an AbstractService with its dependencies.
+     * Constructs an AbstractService with its dependencies using Universal DI pattern.
      *
      * @param options   The service-specific configuration.
      * @param resources A map of all injected resource objects, keyed by port name.
@@ -42,21 +44,19 @@ public abstract class AbstractService implements IService {
     }
 
     /**
-     * Resets error counts for all channel bindings when the service starts.
-     * This ensures error counts are reset only on service restart, not on every metrics collection.
-     * Note: This method needs to be overridden by services that have access to the actual channel bindings.
+     * Resets error counts for all resource bindings when the service starts.
+     * The ServiceManager handles resetting error counts for resource bindings it manages.
      */
-    protected void resetChannelBindingErrorCounts() {
-        // Default implementation does nothing - services with channel bindings should override this
-        // The ServiceManager will handle resetting error counts for channel bindings it manages
+    protected void resetResourceBindingErrorCounts() {
+        // Default implementation - ServiceManager handles this for managed bindings
     }
 
     @Override
     public void start() {
         if (currentState.compareAndSet(State.STOPPED, State.RUNNING)) {
-            // Reset error counts for all channel bindings when service starts
-            resetChannelBindingErrorCounts();
-            
+            // Reset error counts for all resource bindings when service starts
+            resetResourceBindingErrorCounts();
+
             // Start service in separate thread
             this.serviceThread = new Thread(this::run, this.getClass().getSimpleName().toLowerCase());
             this.serviceThread.start();
@@ -99,46 +99,63 @@ public abstract class AbstractService implements IService {
 
     @Override
     public ServiceStatus getServiceStatus() {
-        List<org.evochora.datapipeline.api.services.ChannelBindingStatus> channelBindingStatuses = new java.util.ArrayList<>();
+        List<ResourceBindingStatus> resourceBindingStatuses = new ArrayList<>();
         resources.forEach((portName, resourceList) -> {
             resourceList.forEach(resource -> {
-                if (resource instanceof org.evochora.datapipeline.api.channels.IInputChannel) {
-                    channelBindingStatuses.add(new org.evochora.datapipeline.api.services.ChannelBindingStatus(
-                        portName,
-                        org.evochora.datapipeline.api.services.Direction.INPUT,
-                        determineBindingState(resource, org.evochora.datapipeline.api.services.Direction.INPUT),
-                        0.0
-                    ));
-                } else if (resource instanceof org.evochora.datapipeline.api.channels.IOutputChannel) {
-                    channelBindingStatuses.add(new org.evochora.datapipeline.api.services.ChannelBindingStatus(
-                        portName,
-                        org.evochora.datapipeline.api.services.Direction.OUTPUT,
-                        determineBindingState(resource, org.evochora.datapipeline.api.services.Direction.OUTPUT),
-                        0.0
-                    ));
-                }
+                String usageType = determineUsageType(resource);
+                String resourceName = determineResourceName(portName, resource);
+
+                resourceBindingStatuses.add(new ResourceBindingStatus(
+                    resourceName,
+                    usageType,
+                    determineBindingState(resource, usageType),
+                    0.0
+                ));
             });
         });
-        return new ServiceStatus(currentState.get(), channelBindingStatuses);
+        return new ServiceStatus(currentState.get(), resourceBindingStatuses);
     }
 
-    private org.evochora.datapipeline.api.services.BindingState determineBindingState(Object underlyingChannel, org.evochora.datapipeline.api.services.Direction direction) {
-        if (underlyingChannel instanceof org.evochora.datapipeline.api.channels.IMonitorableChannel) {
-            org.evochora.datapipeline.api.channels.IMonitorableChannel monitorableChannel =
-                    (org.evochora.datapipeline.api.channels.IMonitorableChannel) underlyingChannel;
-            
-            long backlogSize = monitorableChannel.getBacklogSize();
-            long capacity = monitorableChannel.getCapacity();
-            
-            if (direction == org.evochora.datapipeline.api.services.Direction.INPUT) {
-                return backlogSize == 0 ? org.evochora.datapipeline.api.services.BindingState.WAITING : org.evochora.datapipeline.api.services.BindingState.ACTIVE;
-            } else {
-                boolean isFull = (capacity >= 0 && backlogSize >= capacity);
-                return isFull ? org.evochora.datapipeline.api.services.BindingState.WAITING : org.evochora.datapipeline.api.services.BindingState.ACTIVE;
-            }
-        } else {
-            return org.evochora.datapipeline.api.services.BindingState.ACTIVE;
+    private String determineUsageType(Object resource) {
+        if (resource instanceof AbstractResourceBinding<?>) {
+            return ((AbstractResourceBinding<?>) resource).getUsageType();
+        } else if (resource instanceof IInputChannel) {
+            return "input";
+        } else if (resource instanceof IOutputChannel) {
+            return "output";
         }
+        return "default";
+    }
+
+    private String determineResourceName(String portName, Object resource) {
+        if (resource instanceof AbstractResourceBinding<?>) {
+            return ((AbstractResourceBinding<?>) resource).getResourceName();
+        }
+        return portName;
+    }
+
+    private BindingState determineBindingState(Object resource, String usageType) {
+        Object underlyingResource = resource;
+
+        // If it's a resource binding, get the underlying resource
+        if (resource instanceof AbstractResourceBinding<?>) {
+            underlyingResource = ((AbstractResourceBinding<?>) resource).getResource();
+        }
+
+        if (underlyingResource instanceof IMonitorableResource) {
+            IMonitorableResource monitorableResource = (IMonitorableResource) underlyingResource;
+
+            long backlogSize = monitorableResource.getBacklogSize();
+            long capacity = monitorableResource.getCapacity();
+
+            if ("input".equals(usageType) || "channel-in".equals(usageType)) {
+                return backlogSize == 0 ? BindingState.WAITING : BindingState.ACTIVE;
+            } else if ("output".equals(usageType) || "channel-out".equals(usageType)) {
+                boolean isFull = (capacity >= 0 && backlogSize >= capacity);
+                return isFull ? BindingState.WAITING : BindingState.ACTIVE;
+            }
+        }
+        return BindingState.ACTIVE;
     }
 
     @Override
@@ -187,5 +204,22 @@ public abstract class AbstractService implements IService {
         return resources.getOrDefault(portName, Collections.emptyList())
                 .stream()
                 .map(resource -> (T) resource);
+    }
+
+    /**
+     * Checks if the service should pause execution and waits if necessary.
+     * This method should be called periodically in the service's main loop.
+     */
+    protected void checkPausePoint() {
+        synchronized (pauseLock) {
+            while (paused && currentState.get() == State.PAUSED) {
+                try {
+                    pauseLock.wait();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }
     }
 }
