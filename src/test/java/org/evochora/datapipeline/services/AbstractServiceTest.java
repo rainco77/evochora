@@ -67,6 +67,18 @@ public class AbstractServiceTest {
         public void awaitTermination() throws InterruptedException {
             latch.await(5, TimeUnit.SECONDS);
         }
+
+        @Override
+        public List<org.evochora.datapipeline.api.resources.OperationalError> getErrors() {
+            // Return an empty list for testing purposes.
+            return java.util.Collections.emptyList();
+        }
+
+        @Override
+        public void clearErrors() {
+            // In this test implementation, we can leave this empty
+            // as the base class implementation is what's being tested.
+        }
     }
 
     @Test

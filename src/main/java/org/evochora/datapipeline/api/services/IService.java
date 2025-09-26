@@ -1,5 +1,8 @@
 package org.evochora.datapipeline.api.services;
 
+import org.evochora.datapipeline.api.resources.OperationalError;
+import java.util.List;
+
 /**
  * The core interface for all services in the data pipeline.
  * <p>
@@ -62,4 +65,19 @@ public interface IService {
      */
     State getCurrentState();
 
+    /**
+     * Restarts the service. This is typically implemented as a stop() followed by a start().
+     */
+    void restart();
+
+    /**
+     * Returns a list of operational errors that have occurred in the service.
+     * @return A list of {@link OperationalError}s.
+     */
+    List<OperationalError> getErrors();
+
+    /**
+     * Clears the list of operational errors for the service.
+     */
+    void clearErrors();
 }

@@ -34,7 +34,7 @@ public class DummyProducerService extends AbstractService implements IMonitorabl
 
     private static final Logger logger = LoggerFactory.getLogger(DummyProducerService.class);
 
-    private final IOutputQueueResource<DummyMessage> outputQueue;
+    private IOutputQueueResource<DummyMessage> outputQueue;
     private final long intervalMs;
     private final String messagePrefix;
     private final long maxMessages;
@@ -50,11 +50,11 @@ public class DummyProducerService extends AbstractService implements IMonitorabl
         this.messagePrefix = options.hasPath("messagePrefix") ? options.getString("messagePrefix") : "Message";
         this.maxMessages = options.hasPath("maxMessages") ? options.getLong("maxMessages") : -1L;
         this.throughputWindowSeconds = options.hasPath("throughputWindowSeconds") ? options.getInt("throughputWindowSeconds") : 5;
-        this.outputQueue = getRequiredResource("output", IOutputQueueResource.class);
     }
 
     @Override
     protected void run() throws InterruptedException {
+        this.outputQueue = getRequiredResource("output", IOutputQueueResource.class);
         long messageCounter = 0;
         while (!Thread.currentThread().isInterrupted() && (maxMessages == -1 || messageCounter < maxMessages)) {
             checkPause();

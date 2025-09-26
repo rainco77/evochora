@@ -33,7 +33,7 @@ public class DummyConsumerService extends AbstractService implements IMonitorabl
 
     private static final Logger logger = LoggerFactory.getLogger(DummyConsumerService.class);
 
-    private final IInputQueueResource<DummyMessage> inputQueue;
+    private IInputQueueResource<DummyMessage> inputQueue;
     private final long processingDelayMs;
     private final boolean logReceivedMessages;
     private final long maxMessages;
@@ -49,11 +49,11 @@ public class DummyConsumerService extends AbstractService implements IMonitorabl
         this.logReceivedMessages = options.hasPath("logReceivedMessages") && options.getBoolean("logReceivedMessages");
         this.maxMessages = options.hasPath("maxMessages") ? options.getLong("maxMessages") : -1L;
         this.throughputWindowSeconds = options.hasPath("throughputWindowSeconds") ? options.getInt("throughputWindowSeconds") : 5;
-        this.inputQueue = getRequiredResource("input", IInputQueueResource.class);
     }
 
     @Override
     protected void run() throws InterruptedException {
+        this.inputQueue = getRequiredResource("input", IInputQueueResource.class);
         long messageCounter = 0;
         while (!Thread.currentThread().isInterrupted() && (maxMessages == -1 || messageCounter < maxMessages)) {
             checkPause();
