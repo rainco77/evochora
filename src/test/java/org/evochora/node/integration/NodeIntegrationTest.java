@@ -6,6 +6,7 @@ import org.awaitility.Awaitility;
 import org.evochora.datapipeline.api.services.IService;
 import org.evochora.node.Node;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -26,8 +27,9 @@ public class NodeIntegrationTest {
     private static int testPort;
     private static ExecutorService executor;
     private static Future<?> nodeFuture;
-    private static Path tempConfDir;
     private static String originalUserDir;
+    @TempDir
+    static Path tempDir;
 
     @BeforeAll
     static void startNode() throws IOException {
@@ -39,14 +41,13 @@ public class NodeIntegrationTest {
         // The Node loads 'evochora.conf' from the current working directory.
         // We set the working directory to a temp dir and place our test config there.
         originalUserDir = System.getProperty("user.dir");
-        tempConfDir = Files.createTempDirectory("evochora-integration-test");
-        System.setProperty("user.dir", tempConfDir.toString());
+        System.setProperty("user.dir", tempDir.toString());
 
         // Correctly load the test config from test resources and write it to the temp dir
-        Path testConfSource = Path.of("src/test/resources/evochora.conf");
+        Path testConfSource = Path.of(originalUserDir, "src/test/resources/evochora.conf");
         String confTemplate = Files.readString(testConfSource);
         String testConfContent = confTemplate.replace("port = 8080", "port = " + testPort);
-        Files.writeString(tempConfDir.resolve("evochora.conf"), testConfContent);
+        Files.writeString(tempDir.resolve("evochora.conf"), testConfContent);
 
         // Start the node in a background thread
         executor = Executors.newSingleThreadExecutor();
