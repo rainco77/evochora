@@ -32,7 +32,8 @@ dependencies {
     testImplementation("org.mockito:mockito-junit-jupiter:5.12.0")
     testImplementation("org.assertj:assertj-core:3.26.3")
     testImplementation("org.awaitility:awaitility:4.2.1")
-    
+    testImplementation("io.rest-assured:rest-assured:5.4.0")
+
     // Explicitly declare test framework implementation dependencies for Gradle 9 compatibility
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.10.2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -58,7 +59,7 @@ dependencies {
 
 // Definiert die Hauptklasse für den 'run'-Task
 application {
-    mainClass.set("org.evochora.datapipeline.cli.CommandLineInterface")
+    mainClass.set("org.evochora.node.Node")
 }
 
 // Application Plugin erstellt bereits Fat JARs mit allen Dependencies
