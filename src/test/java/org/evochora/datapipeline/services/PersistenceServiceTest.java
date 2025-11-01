@@ -71,7 +71,7 @@ class PersistenceServiceTest {
         resources.put("input", Collections.singletonList(mockInputQueue));
         resources.put("storage", Collections.singletonList(mockStorage));
         // topic is optional - add it per test as needed
-        
+
         config = ConfigFactory.parseMap(Map.of(
             "maxBatchSize", 100,
             "batchTimeoutSeconds", 2,

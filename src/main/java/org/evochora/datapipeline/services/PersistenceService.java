@@ -130,9 +130,28 @@ public class PersistenceService extends AbstractService {
                 currentBatch = new ArrayList<>();
 
                 try {
-                    // Drain batch from queue with timeout
-                    int count = inputQueue.drainTo(currentBatch, maxBatchSize, batchTimeoutSeconds, TimeUnit.SECONDS);
-                    currentBatchSize.set(count); // Always update, even if zero
+                    // Drain batch from queue with RESPONSIVE timeout for fast shutdown
+                    // Instead of blocking for full batchTimeoutSeconds, loop with 1-second max timeout
+                    // and check interrupt status between calls. This ensures Ctrl-C is handled within ~1 second.
+                    long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(batchTimeoutSeconds);
+                    int count = 0;
+
+                    // Loop with 1-second max timeout per drainTo() call for responsive shutdown
+                    while (count == 0 && System.nanoTime() < deadlineNanos) {
+                        // Check interrupt before each drain for responsive shutdown
+                        if (Thread.currentThread().isInterrupted()) {
+                            throw new InterruptedException("Interrupted during batch drain");
+                        }
+
+                        // Calculate remaining time, cap at 1 second for responsive shutdown
+                        long remainingNanos = deadlineNanos - System.nanoTime();
+                        long drainTimeoutNanos = Math.min(remainingNanos, TimeUnit.SECONDS.toNanos(1));
+
+                        if (drainTimeoutNanos > 0) {
+                            count = inputQueue.drainTo(currentBatch, maxBatchSize, drainTimeoutNanos, TimeUnit.NANOSECONDS);
+                            currentBatchSize.set(count); // Update immediately after drain for metrics accuracy
+                        }
+                    }
 
                     if (count == 0) {
                         currentBatch = null;  // No batch to clean up
@@ -144,7 +163,7 @@ public class PersistenceService extends AbstractService {
                     // Process and persist batch
                     processBatch(currentBatch);
                     currentBatch = null;  // Successfully processed
-                    
+
                 } catch (InterruptedException e) {
                     // Keep currentBatch for finally-block (even if partially filled by drainTo)
                     // drainTo() may have transferred data to collection before interruption!
